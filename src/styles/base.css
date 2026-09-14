@@ -64,6 +64,15 @@ body {
   scrollbar-color: var(--color-fill-4) transparent;
 }
 
+/* 手机视口下弹窗/抽屉不得超出屏幕宽度 */
+.arco-modal {
+  max-width: calc(100vw - 32px);
+}
+
+.arco-drawer {
+  max-width: 100vw;
+}
+
 .tab-bar {
   display: flex;
   flex-shrink: 0;
