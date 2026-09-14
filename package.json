@@ -1,0 +1,39 @@
+{
+  "name": "gugle-novel",
+  "private": true,
+  "version": "0.1.0",
+  "license": "LGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test:transport": "esbuild src/services/transport/index.ts --bundle --format=esm --platform=node --outfile=scripts/transport.mjs && esbuild src/api/index.ts --bundle --format=esm --platform=node --outfile=scripts/api-bundle.mjs && node scripts/test-transport.mjs",
+    "tauri": "tauri",
+    "tauri-dev": "tauri dev",
+    "tauri-build": "tauri build",
+    "build:android": "node scripts/sync-android-icons.mjs && pnpm build",
+    "android-init": "tauri android init",
+    "android-dev": "tauri android dev",
+    "android-build": "tauri android build --apk --debug",
+    "android-release": "tauri android build --apk --target aarch64"
+  },
+  "dependencies": {
+    "@arco-design/web-vue": "^2.58.0",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
+    "@tauri-apps/plugin-http": "^2.6.0",
+    "@tauri-apps/plugin-opener": "^2.5.5",
+    "fflate": "^0.8.3",
+    "vue": "^3.5.13",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.6.2",
+    "unplugin-vue-components": "^32.1.0",
+    "vite": "^6.0.3",
+    "vue-tsc": "^2.1.10"
+  }
+}

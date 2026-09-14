@@ -1,0 +1,252 @@
+.settings-workspace {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.settings-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.settings-home-header {
+  padding: 16px 16px 8px;
+}
+
+.settings-home-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.settings-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-list-item {
+  display: flex;
+  width: 100%;
+  height: auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border-2);
+  border-radius: 0;
+  text-align: left;
+}
+
+.settings-list-item .arco-btn-content {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.settings-list-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settings-list-item-label {
+  color: var(--color-text-1);
+  font-size: 15px;
+}
+
+.settings-list-item-description {
+  display: block;
+  margin-top: 4px;
+  color: var(--color-text-4);
+  font-size: 12px;
+}
+
+.settings-list-item-arrow {
+  flex-shrink: 0;
+  color: var(--color-text-4);
+}
+
+.settings-list-item:hover {
+  background: var(--color-fill-2);
+}
+
+.settings-page {
+  max-width: 760px;
+  padding: 16px 16px 48px;
+}
+
+.settings-page-header {
+  margin-bottom: 16px;
+}
+
+.settings-subpage-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-subpage-title h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.settings-page-header > .field-label {
+  margin-top: 4px;
+}
+
+.provider-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+}
+
+.provider-list-item {
+  display: flex;
+  align-items: center;
+  border-radius: 6px;
+}
+
+.provider-list-item.active {
+  background: var(--color-fill-3);
+}
+
+.provider-list-item:hover:not(.active) {
+  background: var(--color-fill-2);
+}
+
+.provider-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.provider-draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.model-section {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.model-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.model-section-header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.model-list-empty {
+  padding: 24px 0;
+  color: var(--color-text-4);
+  text-align: center;
+}
+
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.model-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+}
+
+.model-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.model-card-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-card-actions {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.model-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-card-limits {
+  color: var(--color-text-4);
+  font-size: 12px;
+  gap: 12px;
+}
+
+.model-description {
+  color: var(--color-text-4);
+  font-size: 12px;
+}
+
+.capability-tag {
+  margin-right: 4px;
+}
+
+.prompt-variables {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.prompt-variable-token {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border-3);
+  border-radius: 4px;
+  background: var(--color-bg-3);
+  color: rgb(var(--primary-6));
+  font-size: 12px;
+  cursor: help;
+}
+
+.general-settings {
+  display: flex;
+  max-width: 520px;
+  flex-direction: column;
+  gap: 20px;
+}

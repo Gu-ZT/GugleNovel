@@ -1,0 +1,15 @@
+/* 移动端为默认布局；此处仅做较宽屏幕的微调 */
+@media (min-width: 720px) {
+  .settings-list,
+  .settings-home-header {
+    max-width: 760px;
+  }
+
+  .chat-messages-content {
+    padding: 20px 24px 8px;
+  }
+
+  .chat-composer {
+    padding: 8px 24px 16px;
+  }
+}
