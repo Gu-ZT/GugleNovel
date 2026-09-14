@@ -7,7 +7,6 @@ on:
       - "src/**"
       - "src-tauri/**"
       - "scripts/**"
-      - "CHANGES.md"
       - "index.html"
       - "package.json"
       - "pnpm-lock.yaml"
@@ -198,7 +197,7 @@ jobs:
           APK: ${{ steps.apk.outputs.path }}
         run: gh release upload "$TAG" "$APK" --clobber
 
-  # 构建完成后,从中文变更日志 + commit 记录生成 release notes 和下载表格
+  # 构建完成后,从 commit 记录生成 What's Changed、Full Changelog 链接和下载表格
   update-release-notes:
     needs: [prepare, android]
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
@@ -237,20 +236,6 @@ jobs:
           const fs = require("fs");
           const rel = JSON.parse(fs.readFileSync("release.json", "utf8"));
           const tag = process.env.TAG;
-          const version = tag.replace(/^v/, "").replace(/\+build\.\d+$/, "");
-
-          function extractVersionSection(file, targetVersion) {
-            const lines = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n").split("\n");
-            const heading = `## [${targetVersion}]`;
-            const start = lines.findIndex((line) => line.startsWith(heading));
-            if (start === -1) {
-              throw new Error(`${file} does not contain a ${heading} section`);
-            }
-            const end = lines.findIndex((line, index) => index > start && line.startsWith("## ["));
-            return lines.slice(start, end === -1 ? lines.length : end).join("\n").trim();
-          }
-
-          const chineseNotes = extractVersionSection("CHANGES.md", version);
 
           const commits = fs.readFileSync("commits.txt", "utf8")
             .split("\n").map((s) => s.trim()).filter(Boolean);
@@ -283,7 +268,7 @@ jobs:
           const changelog = previousTag
             ? `**Full Changelog**: https://github.com/${process.env.REPO}/compare/${previousTag}...${tag}`
             : "";
-          const body = [chineseNotes, whatsChanged, changelog, table]
+          const body = [whatsChanged, changelog, table]
             .filter(Boolean)
             .join("\n\n") + "\n";
           fs.writeFileSync("body.md", body);
