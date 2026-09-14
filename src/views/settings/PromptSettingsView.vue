@@ -41,11 +41,11 @@ const router = useRouter();
       <div class="provider-detail">
         <div class="field">
           <label>预设名称</label>
-          <a-input v-model="app.draftName" placeholder="如：小说作家 / 悬疑专用"/>
+          <a-input v-model="app.presetDraftName" placeholder="如：小说作家 / 悬疑专用"/>
         </div>
         <div class="field">
           <label>系统提示词</label>
-          <a-textarea v-model="app.draftSystemPrompt" :auto-size="{minRows: 10, maxRows: 20}"/>
+          <a-textarea v-model="app.presetDraftSystemPrompt" :auto-size="{minRows: 10, maxRows: 20}"/>
         </div>
         <div class="prompt-variables">
           <span class="field-label">可用变量：</span>
@@ -57,7 +57,7 @@ const router = useRouter();
           <a-button
               type="primary"
               :disabled="!app.editingPresetId"
-              @click="app.saveDraft"
+              @click="app.savePresetDraft"
           >保存预设</a-button>
           <a-button
               :disabled="!app.editingPresetId || app.activePresetId === app.editingPresetId"

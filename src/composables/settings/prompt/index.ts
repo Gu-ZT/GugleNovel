@@ -27,8 +27,8 @@ export function usePromptSettings() {
           : presets.value[0]?.id ?? ""
   );
   const editingPresetId = ref(presets.value[0]?.id ?? "");
-  const draftName = ref("");
-  const draftSystemPrompt = ref("");
+  const presetDraftName = ref("");
+  const presetDraftSystemPrompt = ref("");
 
   const activePreset = computed(() => presets.value.find(
       (preset) => preset.id === activePresetId.value
@@ -48,8 +48,8 @@ export function usePromptSettings() {
 
   function loadDraft(preset: PromptPreset | undefined) {
     editingPresetId.value = preset?.id ?? "";
-    draftName.value = preset?.name ?? "";
-    draftSystemPrompt.value = preset?.systemPrompt ?? "";
+    presetDraftName.value = preset?.name ?? "";
+    presetDraftSystemPrompt.value = preset?.systemPrompt ?? "";
   }
 
   function selectPreset(presetId: string) {
@@ -68,11 +68,11 @@ export function usePromptSettings() {
     persist();
   }
 
-  function saveDraft() {
+  function savePresetDraft() {
     const id = editingPresetId.value;
     if (!id) return;
     presets.value = presets.value.map((preset) => preset.id === id
-        ? {...preset, name: draftName.value.trim() || preset.name, systemPrompt: draftSystemPrompt.value}
+        ? {...preset, name: presetDraftName.value.trim() || preset.name, systemPrompt: presetDraftSystemPrompt.value}
         : preset
     );
     persist();
@@ -100,11 +100,11 @@ export function usePromptSettings() {
     activePreset,
     presetSelectOptions,
     editingPresetId,
-    draftName,
-    draftSystemPrompt,
+    presetDraftName,
+    presetDraftSystemPrompt,
     selectPreset,
     addPreset,
-    saveDraft,
+    savePresetDraft,
     removePreset,
     setActivePreset,
   };

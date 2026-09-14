@@ -29,6 +29,7 @@ body {
   flex-direction: column;
   height: 100vh;
   height: 100dvh;
+  padding-top: env(safe-area-inset-top, 0px);
 }
 
 .content {
