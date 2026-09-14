@@ -1,0 +1,291 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "scripts/**"
+      - "CHANGES.md"
+      - "index.html"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "vite.config.ts"
+      - "tsconfig.json"
+      - "tsconfig.node.json"
+      - ".github/workflows/release.yml"
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  # 质量门禁：前端类型检查与构建 + Rust 编译检查，打包必须依赖其结果
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: quality
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Frontend type-check and build
+        run: pnpm build
+
+      - name: Rust check
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+
+  # 确定本次构建对应的 release:
+  # - push 到 main: 自动创建 pre-release,tag 为 <版本号>+build.<run_number>
+  # - 手动创建 release: 直接使用该 release 和用户填写的 tag
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.info.outputs.release_id }}
+      tag: ${{ steps.info.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release
+        id: info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+            echo "release_id=${{ github.event.release.id }}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+            TAG="${VERSION}+build.${{ github.run_number }}"
+            RELEASE_ID=$(gh api "repos/${{ github.repository }}/releases" \
+              -f tag_name="$TAG" \
+              -f target_commitish="${{ github.sha }}" \
+              -f name="$TAG" \
+              -F prerelease=true \
+              -F generate_release_notes=true \
+              --jq .id)
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          fi
+
+  android:
+    needs: [quality, prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 签名材料齐全则出已签名 APK，否则降级为未签名 APK 并给出警告
+      - name: Check Android signing configuration
+        id: signing
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Android signing secrets are incomplete; the APK will be uploaded unsigned."
+          fi
+
+      # 手动 release 时,把用户的 tag(去掉可能的 v 前缀)写入应用版本号
+      - name: Set app version from tag
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}" node -e "
+            const fs = require('fs');
+            const p = 'src-tauri/tauri.conf.json';
+            const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+            c.version = process.env.VERSION;
+            fs.writeFileSync(p, JSON.stringify(c, null, 2));
+          "
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: android-aarch64
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # gen/android 已入库（含系统栏/签名/主题定制），不可重新 init。
+      # build.gradle.kts 在 keystore 文件存在时自动启用 release 签名。
+      - name: Restore signing keystore
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > src-tauri/gen/android/app/gugle-novel.keystore
+          cat > src-tauri/gen/android/app/keystore.properties <<EOF
+          keyStore=gugle-novel.keystore
+          keyAlias=$KEY_ALIAS
+          storePassword=$STORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Build Android arm64 APK
+        run: pnpm tauri android build --target aarch64 --apk --ci
+
+      - name: Verify and rename APK
+        id: apk
+        env:
+          SIGNED: ${{ steps.signing.outputs.configured }}
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "$SIGNED" = "true" ]; then
+            SRC=$(find src-tauri/gen/android/app/build/outputs/apk -name '*release.apk' ! -name '*unsigned*' -print -quit)
+            OUTPUT_APK="GugleNovel-${VERSION}-android-arm64.apk"
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$SRC"
+          else
+            SRC=$(find src-tauri/gen/android/app/build/outputs/apk -name '*release-unsigned.apk' -print -quit)
+            OUTPUT_APK="GugleNovel-${VERSION}-android-arm64-unsigned.apk"
+          fi
+          test -n "$SRC"
+          cp "$SRC" "$OUTPUT_APK"
+          echo "path=$OUTPUT_APK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Android APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          APK: ${{ steps.apk.outputs.path }}
+        run: gh release upload "$TAG" "$APK" --clobber
+
+  # 构建完成后,从中文变更日志 + commit 记录生成 release notes 和下载表格
+  update-release-notes:
+    needs: [prepare, android]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes and download table
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          gh api "repos/$REPO/releases/$RELEASE_ID" > release.json
+          git fetch --force --tags
+          # What's Changed 的 commit 收集范围:
+          # - 预发布 (X.Y.Z+build.N): 自最近一个任意 tag(dev 或正式)起
+          # - 正式版 (v)X.Y.Z:        自上一个正式 tag 起,避免同 commit 的 dev tag 导致空列表
+          if [[ "$TAG" == *+build.* ]]; then
+            PREV_TAG=$(git tag --list | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+(\+build\.[0-9]+)?$' | grep -v -x "$TAG" | sort -rV | head -n 1 || true)
+          else
+            PREV_TAG=$(git tag --list | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | grep -v -x "$TAG" | sort -rV | head -n 1 || true)
+          fi
+          echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
+          if [ -n "$PREV_TAG" ]; then
+            echo "collecting commits since $PREV_TAG"
+            git log --no-merges --format='%s' "$PREV_TAG..HEAD" > commits.txt
+          else
+            echo "no previous tag found; listing all commits"
+            git log --no-merges --format='%s' > commits.txt
+          fi
+          node <<'EOF'
+          const fs = require("fs");
+          const rel = JSON.parse(fs.readFileSync("release.json", "utf8"));
+          const tag = process.env.TAG;
+          const version = tag.replace(/^v/, "").replace(/\+build\.\d+$/, "");
+
+          function extractVersionSection(file, targetVersion) {
+            const lines = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n").split("\n");
+            const heading = `## [${targetVersion}]`;
+            const start = lines.findIndex((line) => line.startsWith(heading));
+            if (start === -1) {
+              throw new Error(`${file} does not contain a ${heading} section`);
+            }
+            const end = lines.findIndex((line, index) => index > start && line.startsWith("## ["));
+            return lines.slice(start, end === -1 ? lines.length : end).join("\n").trim();
+          }
+
+          const chineseNotes = extractVersionSection("CHANGES.md", version);
+
+          const commits = fs.readFileSync("commits.txt", "utf8")
+            .split("\n").map((s) => s.trim()).filter(Boolean);
+          const whatsChanged = commits.length > 0
+            ? ["## What's Changed", "", ...commits.map((c) => `* ${c}`)].join("\n")
+            : "";
+
+          const rules = [
+            [/-android-arm64-unsigned\.apk$/, "Android", "arm64", "APK（未签名）"],
+            [/-android-arm64\.apk$/,          "Android", "arm64", "APK"],
+          ];
+
+          const rows = rel.assets
+            .map((a) => {
+              const i = rules.findIndex(([re]) => re.test(a.name));
+              const [, os, arch, kind] = i === -1 ? [null, "其他", "-", "-"] : rules[i];
+              return { order: i === -1 ? rules.length : i, os, arch, kind, a };
+            })
+            .sort((x, y) => x.order - y.order)
+            .map((r) => `| ${r.os} | ${r.arch} | ${r.kind} | [${r.a.name}](${r.a.browser_download_url}) |`);
+
+          const table = [
+            "## 下载", "",
+            "| 平台 | 架构 | 格式 | 下载 |",
+            "| --- | --- | --- | --- |",
+            ...rows,
+          ].join("\n");
+
+          const previousTag = process.env.PREV_TAG;
+          const changelog = previousTag
+            ? `**Full Changelog**: https://github.com/${process.env.REPO}/compare/${previousTag}...${tag}`
+            : "";
+          const body = [chineseNotes, whatsChanged, changelog, table]
+            .filter(Boolean)
+            .join("\n\n") + "\n";
+          fs.writeFileSync("body.md", body);
+          EOF
+          gh api -X PATCH "repos/$REPO/releases/$RELEASE_ID" -F body=@body.md
