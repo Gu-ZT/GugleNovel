@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {ref} from "vue";
+import {computed, nextTick, onMounted, ref, watch} from "vue";
 import {
   IconBranch,
   IconCheck,
@@ -21,6 +21,44 @@ const editingConversationId = ref("");
 const editingTitle = ref("");
 const conversationDrawerOpen = ref(false);
 const configPanelOpen = ref(false);
+
+// 消息滚动：切换会话强制滚到底部；流式输出期间仅在用户未上翻时跟随滚动
+const messagesRef = ref<HTMLElement | null>(null);
+const stickToBottom = ref(true);
+
+function onMessagesScroll() {
+  const el = messagesRef.value;
+  if (!el) return;
+  stickToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+
+function scrollToBottom(force = false) {
+  const el = messagesRef.value;
+  if (!el || (!force && !stickToBottom.value)) return;
+  el.scrollTop = el.scrollHeight;
+}
+
+const scrollSignal = computed(() => {
+  const path = (props.app.activePath ?? []) as {id: string; content: string}[];
+  const last = path[path.length - 1];
+  return `${path.length}|${last?.content.length ?? 0}`;
+});
+
+watch(() => props.app.activeConversationId, () => {
+  stickToBottom.value = true;
+  nextTick(() => scrollToBottom(true));
+});
+
+watch(scrollSignal, () => nextTick(() => scrollToBottom()));
+
+watch(() => props.app.generating, (generating: boolean) => {
+  if (!generating) return;
+  stickToBottom.value = true;
+  nextTick(() => scrollToBottom(true));
+});
+
+// 初次进入（含从持久化恢复会话）滚到最新一条
+onMounted(() => nextTick(() => scrollToBottom(true)));
 
 function startRename(conversation: any) {
   editingConversationId.value = conversation.id;
@@ -61,7 +99,7 @@ function branchInfoFor(nodeId: string) {
         </div>
       </div>
 
-      <div class="chat-messages" aria-live="polite">
+      <div ref="messagesRef" class="chat-messages" aria-live="polite" @scroll.passive="onMessagesScroll">
         <div class="chat-messages-content">
           <div v-if="app.activePath.length === 0" class="chat-empty">
             <p>向 AI 作家下达第一条写作指令，开始你的小说。</p>

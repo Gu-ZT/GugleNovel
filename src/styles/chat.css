@@ -404,54 +404,91 @@
   text-align: center;
 }
 
-.branch-tree-scroll {
+/* 横版分支树图：锚点在左，逐层向右展开，贝塞尔连线表示层级 */
+.branch-graph-scroll {
   height: 100%;
-  overflow-y: auto;
+  overflow: auto;
 }
 
-.branch-tree {
-  margin: 0;
+.branch-graph {
+  position: relative;
   padding: 0;
-  list-style: none;
 }
 
-.branch-tree-row.on-path .branch-tree-summary {
-  color: var(--color-text-1);
-  font-weight: 600;
+.branch-graph-edges {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 
-.branch-tree-item {
+.branch-edge {
+  stroke: var(--color-fill-4);
+  stroke-width: 1.5;
+}
+
+.branch-edge.on-path {
+  stroke: rgb(var(--primary-6));
+  stroke-width: 2;
+}
+
+.branch-node {
+  position: absolute;
   display: flex;
-  width: 100%;
-  height: auto;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 4px;
-  text-align: left;
-}
-
-.branch-tree-item .arco-btn-content {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.branch-tree-summary {
-  flex: 1;
-  min-width: 0;
+  width: 170px;
+  height: 56px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 10px;
   overflow: hidden;
-  color: var(--color-text-3);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--color-text-2);
+  font: inherit;
+  text-align: left;
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  cursor: pointer;
+  appearance: none;
 }
 
-.branch-tree-path-dot {
-  width: 6px;
-  height: 6px;
+.branch-node:hover {
+  border-color: rgb(var(--primary-5));
+}
+
+.branch-node.on-path {
+  border-color: rgb(var(--primary-6));
+}
+
+.branch-node.is-leaf {
+  box-shadow: 0 0 0 2px rgb(var(--primary-3));
+}
+
+.branch-node-role {
   flex-shrink: 0;
-  border-radius: 50%;
-  background: rgb(var(--primary-6));
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.branch-node.user .branch-node-role {
+  color: rgb(var(--arcoblue-6));
+}
+
+.branch-node.assistant .branch-node-role {
+  color: rgb(var(--green-6));
+}
+
+.branch-node-summary {
+  display: -webkit-box;
+  width: 100%;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.branch-node.on-path .branch-node-summary {
+  color: var(--color-text-1);
 }
