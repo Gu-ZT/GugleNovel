@@ -141,10 +141,14 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
-
+      # ubuntu runner 自带 Android SDK（$ANDROID_HOME）。
+      # 不用 android-actions/setup-android：其内部 sdkmanager 遇到新的 SDK Preview
+      # 许可提示会以退出码 1 失败；这里改为手动接受全部许可后再安装组件。
       - name: Install Android SDK and NDK
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
