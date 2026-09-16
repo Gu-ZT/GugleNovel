@@ -173,7 +173,7 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 --decode > src-tauri/gen/android/app/gugle-novel.keystore
+          echo "$KEYSTORE_BASE64" | tr -d ' \r\n' | base64 --decode > src-tauri/gen/android/app/gugle-novel.keystore
           cat > src-tauri/gen/android/app/keystore.properties <<EOF
           keyStore=gugle-novel.keystore
           keyAlias=$KEY_ALIAS
