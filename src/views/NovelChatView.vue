@@ -15,6 +15,7 @@ import {
   IconStop,
 } from "@arco-design/web-vue/es/icon";
 import BranchTreePanel from "../components/BranchTreePanel.vue";
+import {renderMarkdown} from "../services/markdown";
 
 const props = defineProps<{app: any}>();
 const editingConversationId = ref("");
@@ -39,9 +40,9 @@ function scrollToBottom(force = false) {
 }
 
 const scrollSignal = computed(() => {
-  const path = (props.app.activePath ?? []) as {id: string; content: string}[];
+  const path = (props.app.activePath ?? []) as {id: string; content: string; reasoning?: string}[];
   const last = path[path.length - 1];
-  return `${path.length}|${last?.content.length ?? 0}`;
+  return `${path.length}|${last?.content.length ?? 0}|${last?.reasoning?.length ?? 0}`;
 });
 
 watch(() => props.app.activeConversationId, () => {
@@ -79,6 +80,13 @@ function selectConversation(id: string) {
 
 function branchInfoFor(nodeId: string) {
   return props.app.activeBranches.find((info: any) => info.node.id === nodeId);
+}
+
+/** 该消息是否正在输出（思维链展开中）；输出完毕后思维链折叠 */
+function isThinkingMessage(message: any): boolean {
+  if (!props.app.generating) return false;
+  const path = props.app.activePath ?? [];
+  return path[path.length - 1]?.id === message.id;
 }
 </script>
 
@@ -144,7 +152,18 @@ function branchInfoFor(nodeId: string) {
                 <a-button size="small" type="primary" html-type="submit">保存为新分支</a-button>
               </div>
             </form>
-            <p v-else class="message-content">{{ message.content }}</p>
+            <template v-else>
+              <details
+                  v-if="message.role === 'assistant' && message.reasoning"
+                  class="reasoning-block"
+                  :open="isThinkingMessage(message)"
+              >
+                <summary>{{ isThinkingMessage(message) ? '正在思考…' : '思维链' }}</summary>
+                <div class="reasoning-content">{{ message.reasoning }}</div>
+              </details>
+              <div v-if="message.role === 'assistant'" class="message-content markdown-body" v-html="renderMarkdown(message.content)"></div>
+              <p v-else class="message-content">{{ message.content }}</p>
+            </template>
             <div v-if="message.modelLabel" class="chat-message-model">{{ message.modelLabel }}</div>
           </article>
           <div v-if="app.generating" class="chat-message assistant chat-thinking">正在创作...</div>

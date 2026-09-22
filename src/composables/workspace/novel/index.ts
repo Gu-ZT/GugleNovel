@@ -261,6 +261,12 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
           if (node) node.content = text;
         });
       },
+      onReasoningDelta: (reasoning) => {
+        mutateConversation(conversationId, (target) => {
+          const node = target.nodes[assistantNode.id];
+          if (node) node.reasoning = reasoning;
+        });
+      },
     }).then((text) => {
       mutateConversation(conversationId, (target) => {
         const node = target.nodes[assistantNode.id];
@@ -392,9 +398,10 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
       createdAt: Date.now(),
     };
     mutateConversation(conversation.id, (target) => appendNode(target, branch));
-    const wasLeafLike = node.childrenIds.length === 0;
     cancelEditMessage();
-    if (branch.role === "user" && wasLeafLike) {
+    // 编辑写作指令（用户消息）后自动让 AI 基于新指令重新创作；
+    // 编辑 AI 正文不触发生成，仅保留为人工修订分支。
+    if (branch.role === "user") {
       startGeneration(conversation.id);
     }
   }
@@ -455,15 +462,34 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
   async function copyMessage(nodeId: string, content: string) {
     try {
       await navigator.clipboard.writeText(content);
-      copiedMessageId.value = nodeId;
-      if (copyTimer !== null) window.clearTimeout(copyTimer);
-      copyTimer = window.setTimeout(() => {
-        copiedMessageId.value = "";
-        copyTimer = null;
-      }, 1600);
-    } catch {
-      error.value = "复制消息失败，请检查系统剪贴板权限";
+    } catch (clipboardError) {
+      // Android WebView 常因缺少剪贴板权限拒绝 navigator.clipboard，降级 execCommand
+      console.warn("navigator.clipboard 不可用，降级 execCommand 复制：", clipboardError);
+      const textarea = document.createElement("textarea");
+      textarea.value = content;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      let copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch (execError) {
+        console.error("execCommand 复制失败：", execError);
+      }
+      textarea.remove();
+      if (!copied) {
+        error.value = "复制消息失败，请检查系统剪贴板权限";
+        return;
+      }
     }
+    copiedMessageId.value = nodeId;
+    if (copyTimer !== null) window.clearTimeout(copyTimer);
+    copyTimer = window.setTimeout(() => {
+      copiedMessageId.value = "";
+      copyTimer = null;
+    }, 1600);
   }
 
   return {

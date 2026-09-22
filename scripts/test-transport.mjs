@@ -24,12 +24,27 @@ const server = http.createServer((req, res) => {
     }
     if (body.stream) {
       res.writeHead(200, {"Content-Type": "text/event-stream"});
+      if (body.model === "think") {
+        res.write(`data: ${JSON.stringify({choices: [{delta: {reasoning_content: "让我想想"}}]})}\n\n`);
+        setTimeout(() => {
+          res.write(`data: ${JSON.stringify({choices: [{delta: {reasoning_content: "，雨后会有脚印"}}]})}\n\n`);
+          res.write(`data: ${JSON.stringify({choices: [{delta: {content: "第一章"}}]})}\n\n`);
+          res.write("data: [DONE]\n\n");
+          res.end();
+        }, 50);
+        return;
+      }
       res.write(`data: ${JSON.stringify({choices: [{delta: {content: "你好"}}]})}\n\n`);
       setTimeout(() => {
         res.write(`data: ${JSON.stringify({choices: [{delta: {content: "，世界"}}]})}\n\n`);
         res.write("data: [DONE]\n\n");
         res.end();
       }, 50);
+      return;
+    }
+    if (body.model === "think") {
+      res.writeHead(200, {"Content-Type": "application/json"});
+      res.end(JSON.stringify({choices: [{message: {content: "完整回复", reasoning: "完整思维链"}}]}));
       return;
     }
     res.writeHead(200, {"Content-Type": "application/json"});
@@ -83,6 +98,26 @@ check("abort keeps partial text", partial === "你好");
 // 5. baseUrl 自动补 /v1
 check("baseUrl appends /v1", conn.baseUrl === "http://127.0.0.1:8765/v1");
 check("auth header", conn.jsonHeaders.Authorization === "Bearer test-key");
+
+// 6. 思维链：流式 reasoning_content 累积 + 与正文分离
+const reasoningDeltas = [];
+const thinkText = await requestChatCompletion({
+  connection: conn, model: "think", messages, stream: true,
+  signal: new AbortController().signal,
+  onReasoningDelta: (r) => reasoningDeltas.push(r),
+});
+check("stream reasoning cumulative", reasoningDeltas.join("|") === "让我想想|让我想想，雨后会有脚印");
+check("stream reasoning separated from text", thinkText === "第一章");
+
+// 7. 思维链：非流式 reasoning 字段
+let plainReasoning = "";
+const thinkPlain = await requestChatCompletion({
+  connection: conn, model: "think", messages, stream: false,
+  signal: new AbortController().signal,
+  onReasoningDelta: (r) => { plainReasoning = r; },
+});
+check("non-stream reasoning field", plainReasoning === "完整思维链");
+check("non-stream text unaffected", thinkPlain === "完整回复");
 
 server.closeAllConnections?.();
 await new Promise((resolve) => server.close(resolve));

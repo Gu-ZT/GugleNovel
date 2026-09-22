@@ -150,6 +150,132 @@
   word-break: break-word;
 }
 
+/* AI 正文的 Markdown 渲染排版（marked + DOMPurify 输出） */
+.markdown-body {
+  white-space: normal;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body p {
+  margin: 0 0 12px;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 18px 0 8px;
+  color: var(--color-text-1);
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.markdown-body h1 { font-size: 20px; }
+.markdown-body h2 { font-size: 18px; }
+.markdown-body h3 { font-size: 16px; }
+.markdown-body h4 { font-size: 15px; }
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0 0 12px;
+  padding-left: 22px;
+}
+
+.markdown-body li {
+  margin: 4px 0;
+}
+
+.markdown-body blockquote {
+  margin: 0 0 12px;
+  padding: 4px 12px;
+  color: var(--color-text-2);
+  background: var(--color-fill-1);
+  border-left: 3px solid rgb(var(--primary-6));
+  border-radius: 0 6px 6px 0;
+}
+
+.markdown-body code {
+  padding: 2px 5px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  background: var(--color-fill-2);
+  border-radius: 4px;
+}
+
+.markdown-body pre {
+  margin: 0 0 12px;
+  padding: 12px;
+  overflow-x: auto;
+  background: var(--color-fill-1);
+  border-radius: 8px;
+}
+
+.markdown-body pre code {
+  padding: 0;
+  background: none;
+}
+
+.markdown-body hr {
+  margin: 16px 0;
+  border: none;
+  border-top: 1px solid var(--color-border-2);
+}
+
+.markdown-body a {
+  color: rgb(var(--link-6));
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+.markdown-body table {
+  margin: 0 0 12px;
+  border-collapse: collapse;
+}
+
+.markdown-body th,
+.markdown-body td {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-2);
+}
+
+/* 思维链：灰色小字；输出中展开，输出完毕折叠 */
+.reasoning-block {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  color: var(--color-text-3);
+  font-size: 12px;
+  background: var(--color-fill-1);
+  border: 1px dashed var(--color-border-2);
+  border-radius: 8px;
+}
+
+.reasoning-block summary {
+  color: var(--color-text-3);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.reasoning-block[open] summary {
+  margin-bottom: 6px;
+}
+
+.reasoning-content {
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .chat-message-model {
   margin-top: 8px;
   color: var(--color-text-4);

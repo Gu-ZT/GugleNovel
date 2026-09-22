@@ -6,6 +6,8 @@ export interface MessageNode {
   childrenIds: string[];
   role: MessageRole;
   content: string;
+  /** 思维链内容（推理模型输出），与正文分开存储 */
+  reasoning?: string;
   modelLabel?: string;
   createdAt: number;
 }

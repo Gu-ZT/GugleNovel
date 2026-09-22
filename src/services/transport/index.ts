@@ -18,6 +18,8 @@ export interface ChatCompletionOptions {
   signal: AbortSignal;
   /** 流式增量回调，参数为累计全文 */
   onDelta?: (fullText: string) => void;
+  /** 思维链增量回调，参数为累计思维链全文（DeepSeek reasoning_content / OpenRouter reasoning） */
+  onReasoningDelta?: (fullReasoning: string) => void;
 }
 
 export function isAbortError(error: unknown): boolean {
@@ -52,24 +54,37 @@ export async function requestChatCompletion(options: ChatCompletionOptions): Pro
     throw new Error(await readErrorMessage(response));
   }
   if (!options.stream) {
-    const payload = await response.json() as {choices?: Array<{message?: {content?: unknown}}>};
-    const text = OpenAIConnection.extractTextContent(payload.choices?.[0]?.message?.content);
+    const payload = await response.json() as {
+      choices?: Array<{message?: {content?: unknown; reasoning_content?: unknown; reasoning?: unknown}}>;
+    };
+    const message = payload.choices?.[0]?.message;
+    const reasoning = extractReasoning(message);
+    if (reasoning) options.onReasoningDelta?.(reasoning);
+    const text = OpenAIConnection.extractTextContent(message?.content);
     if (!text.trim()) throw new Error("响应中没有文字内容");
     options.onDelta?.(text);
     return text;
   }
   if (!response.body) throw new Error("提供商未返回流式响应");
-  return readSseStream(response.body, options.onDelta);
+  return readSseStream(response.body, options.onDelta, options.onReasoningDelta);
+}
+
+/** 提取思维链文本：兼容 reasoning_content（DeepSeek）与 reasoning（OpenRouter）字段。 */
+function extractReasoning(source?: {reasoning_content?: unknown; reasoning?: unknown}): string {
+  const value = source?.reasoning_content ?? source?.reasoning;
+  return typeof value === "string" ? value : "";
 }
 
 async function readSseStream(
     body: ReadableStream<Uint8Array>,
-    onDelta?: (fullText: string) => void
+    onDelta?: (fullText: string) => void,
+    onReasoningDelta?: (fullReasoning: string) => void
 ): Promise<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let text = "";
+  let reasoning = "";
   try {
     for (;;) {
       const {done, value} = await reader.read();
@@ -86,9 +101,18 @@ async function readSseStream(
         if (data === "[DONE]") return text;
         try {
           const payload = JSON.parse(data) as {
-            choices?: Array<{delta?: {content?: unknown}; message?: {content?: unknown}}>;
+            choices?: Array<{
+              delta?: {content?: unknown; reasoning_content?: unknown; reasoning?: unknown};
+              message?: {content?: unknown; reasoning_content?: unknown; reasoning?: unknown};
+            }>;
           };
-          const delta = payload.choices?.[0]?.delta?.content ?? payload.choices?.[0]?.message?.content;
+          const choice = payload.choices?.[0];
+          const reasoningPiece = extractReasoning(choice?.delta ?? choice?.message);
+          if (reasoningPiece) {
+            reasoning += reasoningPiece;
+            onReasoningDelta?.(reasoning);
+          }
+          const delta = choice?.delta?.content ?? choice?.message?.content;
           const piece = OpenAIConnection.extractTextContent(delta);
           if (piece) {
             text += piece;
