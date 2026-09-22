@@ -72,6 +72,12 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    lint {
+        // release 构建不跑 lintVital：避免解析 intellij-core/kotlin-compiler 等
+        // 仅存在于 google() 的 lint 构件（私有 maven 镜像可能缺失）
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 }
 
 rust {
