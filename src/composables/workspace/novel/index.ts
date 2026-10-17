@@ -1,5 +1,6 @@
 import {computed, ref, watch} from "vue";
 import {
+  ACTIVE_CONVERSATION_KEY,
   CONVERSATIONS_KEY,
   createConversation,
   createNodeId,
@@ -39,9 +40,19 @@ const persistedConversations = loadJson<Conversation[]>(
     []
 );
 
+const persistedActiveConversationId = loadJson<string | null>(
+    ACTIVE_CONVERSATION_KEY,
+    (value) => typeof value === "string" ? value : null,
+    null
+);
+
 export function useNovelWorkspace(options: NovelWorkspaceOptions) {
   const conversations = ref<Conversation[]>(persistedConversations);
-  const activeConversationId = ref(conversations.value[0]?.id ?? "");
+  const activeConversationId = ref<string>("");
+  const initialConversation = conversations.value.find(
+      (conversation) => conversation.id === persistedActiveConversationId
+  ) ?? conversations.value[0];
+  activeConversationId.value = initialConversation?.id ?? "";
   const draft = ref("");
   const generating = ref(false);
   const error = ref("");
@@ -88,6 +99,17 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
   });
 
   watch(conversations, (value) => saveJson(CONVERSATIONS_KEY, value), {deep: true});
+  watch(activeConversationId, (id) => {
+    if (id && conversations.value.some((conversation) => conversation.id === id)) {
+      saveJson(ACTIVE_CONVERSATION_KEY, id);
+    } else {
+      try {
+        localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
+      } catch {
+        // 隐私模式或存储不可用时保持内存态
+      }
+    }
+  });
 
   function mutateConversation(id: string, mutate: (conversation: Conversation) => void) {
     conversations.value = conversations.value.map((conversation) => {

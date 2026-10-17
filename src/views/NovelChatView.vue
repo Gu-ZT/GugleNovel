@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, nextTick, onMounted, ref, watch} from "vue";
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from "vue";
 import {
   IconBranch,
   IconCheck,
@@ -15,6 +15,7 @@ import {
   IconStop,
 } from "@arco-design/web-vue/es/icon";
 import BranchTreePanel from "../components/BranchTreePanel.vue";
+import {useVisualViewport} from "../composables/viewport/visual";
 import {renderMarkdown} from "../services/markdown";
 
 const props = defineProps<{app: any}>();
@@ -22,6 +23,61 @@ const editingConversationId = ref("");
 const editingTitle = ref("");
 const conversationDrawerOpen = ref(false);
 const configPanelOpen = ref(false);
+
+// Android WebView 的软键盘会改变 visualViewport；用视口高度/偏移收缩壳层，并保持聚焦编辑器可见。
+const {height: viewportHeight, syncViewport} = useVisualViewport();
+const composerRef = ref<HTMLElement | null>(null);
+const composerEditorFocused = ref(false);
+let composerFocusFrame = 0;
+let composerScrollTimer: number | null = null;
+
+function isComposerEditor(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement
+      && Boolean(target.closest(".chat-composer textarea, .chat-composer input"));
+}
+
+function keepComposerVisible() {
+  if (!composerEditorFocused.value) return;
+  if (composerFocusFrame) cancelAnimationFrame(composerFocusFrame);
+  composerFocusFrame = requestAnimationFrame(() => {
+    composerFocusFrame = 0;
+    syncViewport();
+    void nextTick(() => {
+      composerRef.value?.scrollIntoView({block: "nearest", inline: "nearest"});
+    });
+  });
+}
+
+function onComposerFocusIn(event: FocusEvent) {
+  composerEditorFocused.value = isComposerEditor(event.target);
+  keepComposerVisible();
+  // WebView 可能在焦点事件之后才完成键盘动画，再校正一次最终可见位置。
+  if (composerEditorFocused.value) retryKeepComposerVisible();
+}
+
+function onComposerFocusOut(event: FocusEvent) {
+  const nextTarget = event.relatedTarget;
+  if (nextTarget instanceof Node && composerRef.value?.contains(nextTarget)) {
+    composerEditorFocused.value = isComposerEditor(nextTarget);
+    return;
+  }
+  composerEditorFocused.value = false;
+}
+
+watch(viewportHeight, keepComposerVisible);
+
+onBeforeUnmount(() => {
+  if (composerFocusFrame) cancelAnimationFrame(composerFocusFrame);
+  if (composerScrollTimer !== null) window.clearTimeout(composerScrollTimer);
+});
+
+function retryKeepComposerVisible() {
+  if (composerScrollTimer !== null) window.clearTimeout(composerScrollTimer);
+  composerScrollTimer = window.setTimeout(() => {
+    composerScrollTimer = null;
+    keepComposerVisible();
+  }, 160);
+}
 
 // 消息滚动：切换会话强制滚到底部；流式输出期间仅在用户未上翻时跟随滚动
 const messagesRef = ref<HTMLElement | null>(null);
@@ -171,7 +227,12 @@ function isThinkingMessage(message: any): boolean {
       </div>
       <p v-if="app.error" class="error composer-error">{{ app.error }}</p>
 
-      <div class="chat-composer">
+      <div
+          ref="composerRef"
+          class="chat-composer"
+          @focusin="onComposerFocusIn"
+          @focusout="onComposerFocusOut"
+      >
         <div class="composer-config">
           <a-button
               type="text"

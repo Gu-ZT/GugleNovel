@@ -28,6 +28,7 @@ export interface Conversation {
 }
 
 export const CONVERSATIONS_KEY = "gugle-novel-conversations";
+export const ACTIVE_CONVERSATION_KEY = "gugle-novel-active-conversation";
 
 export function createNodeId(): string {
   return globalThis.crypto?.randomUUID?.()

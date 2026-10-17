@@ -27,8 +27,7 @@ body {
 .app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  height: 100dvh;
+  height: calc(var(--visual-viewport-height, 100vh) - var(--app-offset-top, 0px));
   padding-top: env(safe-area-inset-top, 0px);
 }
 
@@ -38,6 +37,7 @@ body {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 /* 全局细滚动条（贴近 Arco 风格），原生滚动，触摸/拖拽/滚轮均可用 */

@@ -318,6 +318,13 @@
   padding: 8px 16px 12px;
 }
 
+/* 键盘压缩可用高度时，写作输入保留足够空间；消息编辑仍在消息区内自行滚动。 */
+@media (max-height: 560px) and (max-width: 719px) {
+  .chat-composer textarea {
+    max-height: 84px !important;
+  }
+}
+
 .composer-config {
   display: flex;
   flex-direction: column;
