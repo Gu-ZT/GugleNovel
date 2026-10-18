@@ -43,7 +43,7 @@ function keepComposerVisible() {
     composerFocusFrame = 0;
     syncViewport();
     void nextTick(() => {
-      composerRef.value?.scrollIntoView({block: "nearest", inline: "nearest"});
+      composerRef.value?.scrollIntoView({block: "end", inline: "nearest"});
     });
   });
 }
@@ -51,7 +51,7 @@ function keepComposerVisible() {
 function onComposerFocusIn(event: FocusEvent) {
   composerEditorFocused.value = isComposerEditor(event.target);
   keepComposerVisible();
-  // WebView 可能在焦点事件之后才完成键盘动画，再校正一次最终可见位置。
+  // WebView 可能在焦点事件之后才完成键盘动画，再多校正几次最终可见位置。
   if (composerEditorFocused.value) retryKeepComposerVisible();
 }
 
@@ -76,7 +76,7 @@ function retryKeepComposerVisible() {
   composerScrollTimer = window.setTimeout(() => {
     composerScrollTimer = null;
     keepComposerVisible();
-  }, 160);
+  }, 360);
 }
 
 // 消息滚动：切换会话强制滚到底部；流式输出期间仅在用户未上翻时跟随滚动

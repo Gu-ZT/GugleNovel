@@ -27,8 +27,11 @@ body {
 .app {
   display: flex;
   flex-direction: column;
-  height: calc(var(--visual-viewport-height, 100vh) - var(--app-offset-top, 0px));
+  height: calc(var(--visual-viewport-height, 100vh) - var(--native-keyboard-height, 0px));
   padding-top: env(safe-area-inset-top, 0px);
+  /* Keep the shell inside the measurable WebView even if visualViewport is unchanged. */
+  max-height: 100vh;
+  max-height: 100dvh;
 }
 
 .content {

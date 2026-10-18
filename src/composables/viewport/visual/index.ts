@@ -2,6 +2,15 @@ import {onBeforeUnmount, onMounted, readonly, ref} from "vue";
 
 const APP_ROOT_SELECTOR = ".app";
 
+interface NativeViewportBridge {
+  keyboardCallback?: (height: number) => void;
+  getKeyboardHeight(): number;
+}
+
+interface NativeViewportWindow extends Window {
+  __GUGLE_VIEWPORT__?: NativeViewportBridge;
+}
+
 function getVisualViewportHeight(): number {
   return window.visualViewport?.height ?? window.innerHeight;
 }
@@ -11,19 +20,17 @@ export function useVisualViewport() {
   const height = ref(getVisualViewportHeight());
   let appRoot: HTMLElement | null = null;
   let resizeFrame = 0;
+  let nativeBridge: NativeViewportBridge | null = null;
 
   function syncViewport() {
+    if (!appRoot) return;
+    // Android reports the IME inset directly. visualViewport can keep its old height
+    // while the keyboard animates, so the shell must also subtract this native inset.
+    if (!document.documentElement.style.getPropertyValue("--native-keyboard-height")) {
+      document.documentElement.style.setProperty("--native-keyboard-height", "0px");
+    }
     const nextHeight = getVisualViewportHeight();
     height.value = nextHeight;
-    if (!appRoot) return;
-    const top = appRoot.scrollHeight > appRoot.clientHeight
-        ? Math.max(0, appRoot.getBoundingClientRect().top)
-        : 0;
-    // A scrolled visual viewport may hide the layout-space top; use the compositor offset
-    // when the shell itself has not moved.
-    const visualOffsetTop = window.visualViewport?.offsetTop ?? 0;
-    const effectiveTop = top || Math.max(0, visualOffsetTop);
-    appRoot.style.setProperty("--app-offset-top", `${effectiveTop}px`);
     appRoot.style.setProperty("--visual-viewport-height", `${nextHeight}px`);
   }
 
@@ -37,6 +44,23 @@ export function useVisualViewport() {
 
   onMounted(() => {
     appRoot = document.querySelector<HTMLElement>(APP_ROOT_SELECTOR);
+    const nativeWindow = window as NativeViewportWindow;
+    nativeBridge = nativeWindow.__GUGLE_VIEWPORT__ ?? null;
+    const updateKeyboardHeight = (keyboardHeight: number) => {
+      if (typeof keyboardHeight !== "number" || !Number.isFinite(keyboardHeight)) return;
+      document.documentElement.style.setProperty(
+          "--native-keyboard-height",
+          `${Math.max(0, keyboardHeight)}px`,
+      );
+      scheduleSync();
+    };
+    // Android calls this page-owned function after each IME inset change.
+    if (nativeBridge) {
+      nativeBridge.keyboardCallback = updateKeyboardHeight;
+      const currentKeyboardHeight = nativeBridge.getKeyboardHeight();
+      if (currentKeyboardHeight > 0) updateKeyboardHeight(currentKeyboardHeight);
+    }
+    updateKeyboardHeight(0);
     syncViewport();
     window.addEventListener("resize", scheduleSync);
     window.visualViewport?.addEventListener("resize", scheduleSync);
@@ -47,9 +71,10 @@ export function useVisualViewport() {
     window.removeEventListener("resize", scheduleSync);
     window.visualViewport?.removeEventListener("resize", scheduleSync);
     window.visualViewport?.removeEventListener("scroll", scheduleSync);
+    if (nativeBridge) nativeBridge.keyboardCallback = undefined;
     if (resizeFrame) cancelAnimationFrame(resizeFrame);
-    appRoot?.style.removeProperty("--app-offset-top");
     appRoot?.style.removeProperty("--visual-viewport-height");
+    document.documentElement.style.removeProperty("--native-keyboard-height");
   });
 
   return {height: readonly(height), syncViewport};
