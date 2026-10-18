@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, nextTick, onMounted, ref, watch} from "vue";
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from "vue";
 import {
   IconBranch,
   IconCheck,
@@ -24,49 +24,36 @@ const editingTitle = ref("");
 const conversationDrawerOpen = ref(false);
 const configPanelOpen = ref(false);
 
-// Android 原生层已经按 IME inset 缩小 WebView；页面只跟随实际视口高度。
-useVisualViewport();
+// Native Android provides one inset snapshot for status/navigation/IME; the page never
+// applies visualViewport offsets on top of that snapshot.
+const {syncViewport} = useVisualViewport();
 const composerRef = ref<HTMLElement | null>(null);
-const composerEditorFocused = ref(false);
-let composerScrollTimer: number | null = null;
+let composerSyncTimer: number | null = null;
 
 function isComposerEditor(target: EventTarget | null): boolean {
   return target instanceof HTMLElement
       && Boolean(target.closest(".chat-composer textarea, .chat-composer input"));
 }
 
-/** 仅在 WebView 未产生布局 resize 时局部恢复编辑器，避免把整个应用壳滚出屏幕。 */
-function ensureFocusedComposerVisible() {
-  if (!composerEditorFocused.value || !composerRef.value) return;
-  const viewport = window.visualViewport;
-  if (!viewport || viewport.height >= window.innerHeight - 1) return;
-  const composerRect = composerRef.value.getBoundingClientRect();
-  const visibleBottom = viewport.offsetTop + viewport.height;
-  if (composerRect.bottom > visibleBottom) {
-    document.scrollingElement?.scrollTo({top: 0});
-    composerRef.value.scrollIntoView({block: "end", inline: "nearest"});
-  }
+/** The composer is a fixed part of the shell; never scroll the document itself. */
+function ensurePageAnchored() {
+  syncViewport();
+  if (window.scrollY !== 0) window.scrollTo(0, 0);
 }
 
 function onComposerFocusIn(event: FocusEvent) {
-  composerEditorFocused.value = isComposerEditor(event.target);
-  if (!composerEditorFocused.value) return;
-  nextTick(ensureFocusedComposerVisible);
-  if (composerScrollTimer !== null) window.clearTimeout(composerScrollTimer);
-  composerScrollTimer = window.setTimeout(() => {
-    composerScrollTimer = null;
-    ensureFocusedComposerVisible();
+  if (!isComposerEditor(event.target)) return;
+  nextTick(ensurePageAnchored);
+  if (composerSyncTimer !== null) window.clearTimeout(composerSyncTimer);
+  composerSyncTimer = window.setTimeout(() => {
+    composerSyncTimer = null;
+    ensurePageAnchored();
   }, 360);
 }
 
-function onComposerFocusOut(event: FocusEvent) {
-  const nextTarget = event.relatedTarget;
-  if (nextTarget instanceof Node && composerRef.value?.contains(nextTarget)) {
-    composerEditorFocused.value = isComposerEditor(nextTarget);
-    return;
-  }
-  composerEditorFocused.value = false;
-}
+onBeforeUnmount(() => {
+  if (composerSyncTimer !== null) window.clearTimeout(composerSyncTimer);
+});
 
 // 消息滚动：切换会话强制滚到底部；流式输出期间仅在用户未上翻时跟随滚动
 const messagesRef = ref<HTMLElement | null>(null);
@@ -220,7 +207,6 @@ function isThinkingMessage(message: any): boolean {
           ref="composerRef"
           class="chat-composer"
           @focusin="onComposerFocusIn"
-          @focusout="onComposerFocusOut"
       >
         <div class="composer-config">
           <a-button

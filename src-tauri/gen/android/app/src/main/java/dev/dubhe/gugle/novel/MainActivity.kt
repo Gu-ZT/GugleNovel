@@ -1,31 +1,51 @@
 package dev.dubhe.gugle.novel
 
+import android.os.Bundle
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
   private var webView: WebView? = null
-  private var keyboardHeightDp = 0f
+  private var insetSnapshot = ViewportInset()
 
-  /** Exposed as window.__GUGLE_VIEWPORT__; the page owns the callback function. */
+  /** Data exposed to window.__GUGLE_VIEWPORT__; values are CSS pixels. */
+  data class ViewportInset(
+    val top: Float = 0f,
+    val right: Float = 0f,
+    val bottom: Float = 0f,
+    val left: Float = 0f,
+    val keyboard: Float = 0f,
+  ) {
+    fun toJson(): String =
+      "{\"top\":$top,\"right\":$right,\"bottom\":$bottom,\"left\":$left,\"keyboard\":$keyboard}"
+  }
+
   inner class ViewportBridge {
     @JavascriptInterface
-    fun getKeyboardHeight(): Float = keyboardHeightDp
+    fun getInsets(): String = insetSnapshot.toJson()
   }
 
   private val viewportBridge = ViewportBridge()
 
+  override fun onCreate(savedInstanceState: Bundle?) {
+    enableEdgeToEdge(
+      statusBarStyle = SystemBarStyle.dark(0x17171A),
+      navigationBarStyle = SystemBarStyle.dark(0x17171A),
+    )
+    super.onCreate(savedInstanceState)
+  }
+
   override fun onWebViewCreate(webView: WebView) {
     this.webView = webView
     webView.addJavascriptInterface(viewportBridge, "__GUGLE_VIEWPORT__")
-    // Keep the WebView at full size; the page shell follows visualViewport and the
-    // app tab bar stays above the keyboard. Never pad this view twice.
+    // Keep the WebView full-screen and expose insets as one page layout snapshot.
     ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
-      val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
-      reportKeyboardHeight(webView, ime.bottom)
+      publishInsets(webView, insets)
       insets
     }
     ViewCompat.setWindowInsetsAnimationCallback(
@@ -35,7 +55,7 @@ class MainActivity : TauriActivity() {
           insets: WindowInsetsCompat,
           runningAnimations: MutableList<WindowInsetsAnimationCompat>,
         ): WindowInsetsCompat {
-          reportKeyboardHeight(webView, insets.getInsets(WindowInsetsCompat.Type.ime()).bottom)
+          publishInsets(webView, insets)
           return insets
         }
       },
@@ -43,18 +63,25 @@ class MainActivity : TauriActivity() {
     webView.requestApplyInsets()
   }
 
-  private fun reportKeyboardHeight(view: WebView, pixels: Int) {
+  private fun publishInsets(view: WebView, insets: WindowInsetsCompat) {
+    val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+    val navigation = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
+    val tappable = insets.getInsets(WindowInsetsCompat.Type.tappableElement())
+    val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
     val density = resources.displayMetrics.density
     if (density <= 0f) return
-    val cssHeight = pixels / density
-    keyboardHeightDp = cssHeight
+    insetSnapshot = ViewportInset(
+      top = systemBars.top / density,
+      right = systemBars.right / density,
+      bottom = maxOf(navigation.bottom, tappable.bottom) / density,
+      left = systemBars.left / density,
+      keyboard = ime.bottom / density,
+    )
     val script = "window.__GUGLE_VIEWPORT__ && " +
-      "window.__GUGLE_VIEWPORT__.keyboardCallback && " +
-      "window.__GUGLE_VIEWPORT__.keyboardCallback($cssHeight)"
-    view.post {
-      view.evaluateJavascript(script, null)
-      // Dispatch again after the keyboard animation and page startup.
-      view.postDelayed({ view.evaluateJavascript(script, null) }, 250)
-    }
+      "window.__GUGLE_VIEWPORT__.insetCallback && " +
+      "window.__GUGLE_VIEWPORT__.insetCallback(${insetSnapshot.toJson()})"
+    view.post { view.evaluateJavascript(script, null) }
+    // The page can attach its callback after the first inset dispatch or after reload.
+    view.postDelayed({ view.evaluateJavascript(script, null) }, 300)
   }
 }
