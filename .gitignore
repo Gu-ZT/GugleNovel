@@ -9,4 +9,5 @@ dist-ssr
 scripts/transport.mjs
 scripts/api-bundle.mjs
 scripts/novel-bundle.cjs
+scripts/viewport-bundle.mjs
 

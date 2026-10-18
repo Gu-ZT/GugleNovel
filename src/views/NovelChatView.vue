@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from "vue";
+import {computed, nextTick, onMounted, ref, watch} from "vue";
 import {
   IconBranch,
   IconCheck,
@@ -24,11 +24,10 @@ const editingTitle = ref("");
 const conversationDrawerOpen = ref(false);
 const configPanelOpen = ref(false);
 
-// Android WebView 的软键盘会改变 visualViewport；用视口高度/偏移收缩壳层，并保持聚焦编辑器可见。
-const {height: viewportHeight, syncViewport} = useVisualViewport();
+// Android 原生层已经按 IME inset 缩小 WebView；页面只跟随实际视口高度。
+useVisualViewport();
 const composerRef = ref<HTMLElement | null>(null);
 const composerEditorFocused = ref(false);
-let composerFocusFrame = 0;
 let composerScrollTimer: number | null = null;
 
 function isComposerEditor(target: EventTarget | null): boolean {
@@ -36,23 +35,28 @@ function isComposerEditor(target: EventTarget | null): boolean {
       && Boolean(target.closest(".chat-composer textarea, .chat-composer input"));
 }
 
-function keepComposerVisible() {
-  if (!composerEditorFocused.value) return;
-  if (composerFocusFrame) cancelAnimationFrame(composerFocusFrame);
-  composerFocusFrame = requestAnimationFrame(() => {
-    composerFocusFrame = 0;
-    syncViewport();
-    void nextTick(() => {
-      composerRef.value?.scrollIntoView({block: "end", inline: "nearest"});
-    });
-  });
+/** 仅在 WebView 未产生布局 resize 时局部恢复编辑器，避免把整个应用壳滚出屏幕。 */
+function ensureFocusedComposerVisible() {
+  if (!composerEditorFocused.value || !composerRef.value) return;
+  const viewport = window.visualViewport;
+  if (!viewport || viewport.height >= window.innerHeight - 1) return;
+  const composerRect = composerRef.value.getBoundingClientRect();
+  const visibleBottom = viewport.offsetTop + viewport.height;
+  if (composerRect.bottom > visibleBottom) {
+    document.scrollingElement?.scrollTo({top: 0});
+    composerRef.value.scrollIntoView({block: "end", inline: "nearest"});
+  }
 }
 
 function onComposerFocusIn(event: FocusEvent) {
   composerEditorFocused.value = isComposerEditor(event.target);
-  keepComposerVisible();
-  // WebView 可能在焦点事件之后才完成键盘动画，再多校正几次最终可见位置。
-  if (composerEditorFocused.value) retryKeepComposerVisible();
+  if (!composerEditorFocused.value) return;
+  nextTick(ensureFocusedComposerVisible);
+  if (composerScrollTimer !== null) window.clearTimeout(composerScrollTimer);
+  composerScrollTimer = window.setTimeout(() => {
+    composerScrollTimer = null;
+    ensureFocusedComposerVisible();
+  }, 360);
 }
 
 function onComposerFocusOut(event: FocusEvent) {
@@ -62,21 +66,6 @@ function onComposerFocusOut(event: FocusEvent) {
     return;
   }
   composerEditorFocused.value = false;
-}
-
-watch(viewportHeight, keepComposerVisible);
-
-onBeforeUnmount(() => {
-  if (composerFocusFrame) cancelAnimationFrame(composerFocusFrame);
-  if (composerScrollTimer !== null) window.clearTimeout(composerScrollTimer);
-});
-
-function retryKeepComposerVisible() {
-  if (composerScrollTimer !== null) window.clearTimeout(composerScrollTimer);
-  composerScrollTimer = window.setTimeout(() => {
-    composerScrollTimer = null;
-    keepComposerVisible();
-  }, 360);
 }
 
 // 消息滚动：切换会话强制滚到底部；流式输出期间仅在用户未上翻时跟随滚动

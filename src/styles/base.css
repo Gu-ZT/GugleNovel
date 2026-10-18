@@ -27,11 +27,12 @@ body {
 .app {
   display: flex;
   flex-direction: column;
-  height: calc(var(--visual-viewport-height, 100vh) - var(--native-keyboard-height, 0px));
+  height: var(--visual-viewport-height, 100vh);
+  min-height: 0;
   padding-top: env(safe-area-inset-top, 0px);
-  /* Keep the shell inside the measurable WebView even if visualViewport is unchanged. */
-  max-height: 100vh;
-  max-height: 100dvh;
+  overflow: hidden;
+  /* Keep the shell's bottom aligned with a WebView visual viewport that has scrolled up. */
+  transform: translateY(var(--visual-viewport-offset-top, 0px));
 }
 
 .content {
