@@ -1,5 +1,5 @@
 import {OpenAIConnection} from "../../api";
-import {systemFetch} from "../../composables/fetch";
+import {describeHttpFailure, systemFetch} from "../../composables/fetch";
 import type {ChatToolDefinition} from "../../domain/illustration";
 
 export type ChatRole = "system" | "user" | "assistant" | "tool";
@@ -76,10 +76,7 @@ export async function requestChatCompletion(options: ChatCompletionOptions): Pro
     });
   } catch (error) {
     if (isAbortError(error)) throw error;
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(
-        `无法连接到提供商，请检查网络、API 地址与 CORS 设置（${detail}）`
-    );
+    throw new Error(describeHttpFailure(error, "无法连接到提供商，请检查网络、API 地址与 CORS 设置"));
   }
   if (!response.ok) {
     throw new Error(await readErrorMessage(response));

@@ -1,5 +1,5 @@
 import {OpenAIConnection} from "../../api";
-import {systemFetch} from "../../composables/fetch";
+import {describeHttpFailure, systemFetch} from "../../composables/fetch";
 import type {ResolvedModel} from "../../domain/models";
 import {isAbortError} from "../transport";
 
@@ -36,8 +36,7 @@ export async function generateIllustration(options: ImageGenerationOptions): Pro
     });
   } catch (error) {
     if (isAbortError(error)) throw error;
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`无法连接到图像模型，请检查网络与 API 地址（${detail}）`);
+    throw new Error(describeHttpFailure(error, "无法连接到图像模型，请检查网络与 API 地址"));
   }
   if (!response.ok) throw new Error(await readImageError(response));
   const payload = await response.json() as ImageGenerationPayload;
@@ -52,6 +51,7 @@ export async function generateIllustration(options: ImageGenerationOptions): Pro
   throw new Error("图像模型返回的图片数据无法识别");
 }
 
+/** 把 base64 图片按文件头判断格式后转为 Blob。 */
 function decodeBase64Image(encoded: string): GeneratedImage {
   let binary: string;
   try {
@@ -88,8 +88,7 @@ async function downloadImage(url: string, signal: AbortSignal): Promise<Generate
     response = await systemFetch(url, {method: "GET", signal});
   } catch (error) {
     if (isAbortError(error)) throw error;
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`下载生成的图片失败（${detail}）`);
+    throw new Error(describeHttpFailure(error, "下载生成的图片失败"));
   }
   if (!response.ok) throw new Error(`下载生成的图片失败（HTTP ${response.status}）`);
   const blob = await response.blob();

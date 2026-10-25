@@ -327,6 +327,35 @@ check("image request body", imageRequest?.body.model === "image-b64"
   && imageRequest?.body.n === 1);
 check("image request has no api key in url", !String(imageRequest?.url).includes("sk-"));
 
+// 16. Tauri HTTP 作用域拦截必须提示为客户端授权问题，禁止误报为网络故障
+const originalFetchForScope = globalThis.fetch;
+globalThis.fetch = async () => {
+  throw new Error(
+    "url not allowed on the configured scope: http://192.168.20.28:8000/v1/images/generations",
+  );
+};
+let scopeImageError = "";
+try {
+  await generateIllustration({
+    model: {provider: {endpoint: "http://192.168.20.28:8000", apiKey: "k"}, model: {id: "image-scope"}},
+    prompt: "x",
+    signal: new AbortController().signal,
+  });
+} catch (error) { scopeImageError = error.message; }
+check("scope denial mentions app authorization", scopeImageError.includes("应用未允许访问该接口地址"));
+check("scope denial keeps original detail", scopeImageError.includes("url not allowed on the configured scope"));
+
+let scopeChatError = "";
+try {
+  await requestChatCompletion({
+    connection: new OpenAIConnection("http://192.168.20.28:8000", "k"),
+    model: "m", messages, stream: false,
+    signal: new AbortController().signal,
+  });
+} catch (error) { scopeChatError = error.message; }
+check("scope denial also applies to chat requests", scopeChatError.includes("应用未允许访问该接口地址"));
+globalThis.fetch = originalFetchForScope;
+
 server.closeAllConnections?.();
 await new Promise((resolve) => server.close(resolve));
 console.log(failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`);
