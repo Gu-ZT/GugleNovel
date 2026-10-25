@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import {computed} from "vue";
-import {resolvePath, type Conversation, type MessageNode, type MessageRole} from "../domain/tree";
+import {
+  messageText,
+  resolvePath,
+  type Conversation,
+  type MessageNode,
+  type MessageRole,
+} from "../domain/tree";
 
 const props = defineProps<{app: any}>();
 
@@ -30,6 +36,13 @@ function roleLabel(role: MessageRole): string {
 function summarize(content: string): string {
   const text = content.replace(/\s+/g, " ").trim();
   return text.length > 24 ? `${text.slice(0, 24)}…` : text || "（空）";
+}
+
+/** 分支卡片摘要：正文取文本段，附图消息额外标注图片数量。 */
+function nodeSummary(node: MessageNode): string {
+  const text = summarize(messageText(node));
+  const images = node.segments.filter((segment) => segment.type === "image").length;
+  return images > 0 ? `${text}（${images} 张插图）` : text;
 }
 
 // 横版树布局：根在最左，每层一列向右展开；叶子按顺序分配行，父节点垂直居中于子树
@@ -119,11 +132,11 @@ const layout = computed(() => {
             class="branch-node"
             :class="[placed.node.role, { 'on-path': placed.onPath, 'is-leaf': placed.isLeaf }]"
             :style="{ left: `${placed.x}px`, top: `${placed.y}px` }"
-            :title="placed.node.content"
+            :title="messageText(placed.node)"
             @click="app.focusNode(placed.node.id)"
         >
           <span class="branch-node-role">{{ roleLabel(placed.node.role) }}</span>
-          <span class="branch-node-summary">{{ summarize(placed.node.content) }}</span>
+          <span class="branch-node-summary">{{ nodeSummary(placed.node) }}</span>
         </button>
       </div>
     </div>

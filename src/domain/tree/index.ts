@@ -1,11 +1,27 @@
 export type MessageRole = "system" | "user" | "assistant";
 
+/** 助手正文的最小单元：文本段与插图段按生成顺序交替排列。 */
+export interface TextSegment {
+  type: "text";
+  text: string;
+}
+
+export interface ImageSegment {
+  type: "image";
+  /** 图片二进制存放在 IndexedDB，本地只在消息中保留引用 id */
+  imageId: string;
+  /** 主模型提交给图像模型的提示词，用于展示与导出说明 */
+  prompt: string;
+}
+
+export type MessageSegment = TextSegment | ImageSegment;
+
 export interface MessageNode {
   id: string;
   parentId: string | null;
   childrenIds: string[];
   role: MessageRole;
-  content: string;
+  segments: MessageSegment[];
   /** 思维链内容（推理模型输出），与正文分开存储 */
   reasoning?: string;
   modelLabel?: string;
@@ -22,6 +38,8 @@ export interface Conversation {
   presetId?: string;
   /** 会话级提示词变量（题材 / 文风格式） */
   variables: Record<string, string>;
+  /** 会话级生图提示词快照，缺失时回落到当前预设 */
+  illustrationPrompts?: {sfw: string; nsfw: string};
   nodes: Record<string, MessageNode>;
   rootIds: string[];
   activeLeafId: string;
@@ -40,7 +58,11 @@ export function createConversationId(): string {
       ?? `conversation-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-export function createConversation(systemPrompt: string, presetId?: string): Conversation {
+export function createConversation(
+    systemPrompt: string,
+    presetId?: string,
+    illustrationPrompts?: {sfw: string; nsfw: string}
+): Conversation {
   return {
     id: createConversationId(),
     title: "新对话",
@@ -48,6 +70,9 @@ export function createConversation(systemPrompt: string, presetId?: string): Con
     systemPrompt,
     presetId,
     variables: {genre: "", style: ""},
+    illustrationPrompts: illustrationPrompts
+        ? {sfw: illustrationPrompts.sfw, nsfw: illustrationPrompts.nsfw}
+        : undefined,
     nodes: {},
     rootIds: [],
     activeLeafId: "",
@@ -112,10 +137,73 @@ export function subtreeIds(conversation: Conversation, nodeId: string): string[]
   return result;
 }
 
-/** 估算当前路径的 token 占用（粗略：字符数 / 4，原型标注“估算”）。 */
+/** 节点正文的纯文本（忽略插图），用于复制、标题与上下文预算。 */
+export function messageText(node: MessageNode): string {
+  return node.segments
+      .filter((segment): segment is TextSegment => segment.type === "text")
+      .map((segment) => segment.text)
+      .join("\n\n");
+}
+
+/** 供主模型读取的上下文形式：插图以文字占位，避免重复传输图片。 */
+export function messageContextText(node: MessageNode): string {
+  return node.segments
+      .map((segment) => segment.type === "text" ? segment.text : `[插图：${segment.prompt}]`)
+      .join("\n\n");
+}
+
+/** 追加流式文本：接在当前末尾文本段之后，末尾是插图时新开一段。 */
+export function appendTextSegment(node: MessageNode, delta: string): void {
+  const last = node.segments[node.segments.length - 1];
+  if (last && last.type === "text") {
+    last.text += delta;
+  } else {
+    node.segments.push({type: "text", text: delta});
+  }
+}
+
+/** 在当前正文之后插入一张插图，后续正文会落到图片之后的新文本段。 */
+export function appendImageSegment(node: MessageNode, imageId: string, prompt: string): void {
+  node.segments.push({type: "image", imageId, prompt});
+}
+
+/** 节点的全部图片引用 id，用于删除消息后清理无主图片。 */
+export function conversationImageIds(conversation: Conversation): string[] {
+  const ids = new Set<string>();
+  for (const node of Object.values(conversation.nodes)) {
+    for (const segment of node.segments) {
+      if (segment.type === "image") ids.add(segment.imageId);
+    }
+  }
+  return [...ids];
+}
+
+/** 统计文本中的正文段落数：空行分段，整段没有空行时按单换行分段，兼容 CRLF。 */
+export function countParagraphs(text: string): number {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  const blocks = normalized.split(/\n{2,}/).filter((block) => block.trim().length > 0);
+  // 模型常用单换行分段；整段没有空行时按行统计，避免段落间隔永远达不到
+  if (blocks.length <= 1) {
+    return normalized.split("\n").filter((line) => line.trim().length > 0).length;
+  }
+  return blocks.length;
+}
+
+/** 自最后一张插图之后累计的正文段落数，用于判断是否达到插图频率。 */
+export function paragraphsSinceLastImage(node: MessageNode): number {
+  let total = 0;
+  for (let index = node.segments.length - 1; index >= 0; index--) {
+    const segment = node.segments[index];
+    if (segment.type === "image") break;
+    total += countParagraphs(segment.text);
+  }
+  return total;
+}
+
+/** 估算当前路径的 token 占用（字符数除以 4）。 */
 export function estimatePathTokens(conversation: Conversation): number {
   const chars = resolvePath(conversation)
-      .reduce((total, node) => total + node.content.length, 0)
+      .reduce((total, node) => total + messageContextText(node).length, 0)
       + conversation.systemPrompt.length;
   return Math.ceil(chars / 4);
 }
@@ -141,17 +229,84 @@ export function flattenTree(conversation: Conversation): TreeRow[] {
   return rows;
 }
 
+/** 校验并规整分段数组；旧版本只有 content 字段的数据迁移为单个文本段。 */
+export function normalizeSegments(record: Record<string, unknown>): MessageSegment[] {
+  const segments: MessageSegment[] = [];
+  if (Array.isArray(record.segments)) {
+    for (const item of record.segments) {
+      if (!item || typeof item !== "object") continue;
+      const segment = item as Record<string, unknown>;
+      if (segment.type === "image") {
+        if (typeof segment.imageId !== "string" || !segment.imageId) continue;
+        segments.push({
+          type: "image",
+          imageId: segment.imageId,
+          prompt: typeof segment.prompt === "string" ? segment.prompt : "",
+        });
+        continue;
+      }
+      if (typeof segment.text === "string") {
+        segments.push({type: "text", text: segment.text});
+      }
+    }
+    return segments;
+  }
+  if (typeof record.content === "string" && record.content.length > 0) {
+    return [{type: "text", text: record.content}];
+  }
+  return [];
+}
+
+function normalizeNode(value: unknown): MessageNode | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string" || !record.id) return null;
+  const role: MessageRole = record.role === "user" || record.role === "system" ? record.role : "assistant";
+  return {
+    id: record.id,
+    parentId: typeof record.parentId === "string" ? record.parentId : null,
+    childrenIds: Array.isArray(record.childrenIds)
+        ? record.childrenIds.filter((id): id is string => typeof id === "string")
+        : [],
+    role,
+    segments: normalizeSegments(record),
+    reasoning: typeof record.reasoning === "string" ? record.reasoning : undefined,
+    modelLabel: typeof record.modelLabel === "string" ? record.modelLabel : undefined,
+    createdAt: typeof record.createdAt === "number" ? record.createdAt : Date.now(),
+  };
+}
+
+/**
+ * 规整消息表：逐节点校验分段与父子引用，丢弃无法定位父节点的孤儿节点，
+ * 避免存储损坏的数据在渲染或追加分支时抛异常。
+ */
+export function normalizeNodes(value: unknown): Record<string, MessageNode> {
+  if (!value || typeof value !== "object") return {};
+  const source = value as Record<string, unknown>;
+  const nodes: Record<string, MessageNode> = {};
+  for (const [key, item] of Object.entries(source)) {
+    const node = normalizeNode(item);
+    if (!node) continue;
+    nodes[key] = node;
+  }
+  for (const node of Object.values(nodes)) {
+    node.childrenIds = node.childrenIds.filter((id) => nodes[id] && nodes[id].parentId === node.id);
+  }
+  for (const node of Object.values(nodes)) {
+    if (node.parentId !== null && !nodes[node.parentId]) node.parentId = null;
+  }
+  return nodes;
+}
+
 export function normalizeConversations(value: unknown): Conversation[] {
   if (!Array.isArray(value)) return [];
   const conversations: Conversation[] = [];
   for (const item of value) {
     if (!item || typeof item !== "object") continue;
     const record = item as Record<string, unknown>;
-    const nodes = record.nodes && typeof record.nodes === "object"
-        ? record.nodes as Record<string, MessageNode>
-        : {};
+    const nodes = normalizeNodes(record.nodes);
     const rootIds = Array.isArray(record.rootIds)
-        ? record.rootIds.filter((id): id is string => typeof id === "string")
+        ? record.rootIds.filter((id): id is string => typeof id === "string" && Boolean(nodes[id]))
         : [];
     const id = typeof record.id === "string" && record.id.trim() ? record.id : createConversationId();
     const activeLeafId = typeof record.activeLeafId === "string" && nodes[record.activeLeafId]
@@ -166,12 +321,23 @@ export function normalizeConversations(value: unknown): Conversation[] {
       variables: record.variables && typeof record.variables === "object"
           ? record.variables as Record<string, string>
           : {},
+      illustrationPrompts: normalizeIllustrationPrompts(record.illustrationPrompts),
       nodes,
       rootIds,
       activeLeafId,
     });
   }
   return conversations;
+}
+
+/** 会话级生图提示词快照；缺失时保留 undefined，由调用方回落到预设默认值。 */
+function normalizeIllustrationPrompts(value: unknown): {sfw: string; nsfw: string} | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  return {
+    sfw: typeof record.sfw === "string" ? record.sfw : "",
+    nsfw: typeof record.nsfw === "string" ? record.nsfw : "",
+  };
 }
 
 function findAnyLeaf(nodes: Record<string, MessageNode>, rootIds: string[]): string {

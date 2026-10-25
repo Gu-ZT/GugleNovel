@@ -1,18 +1,33 @@
 import {strToU8, zipSync} from "fflate";
 import {resolvePath, type Conversation, type MessageNode} from "../../domain/tree";
 import {inTauriShell} from "../../composables/fetch";
+import {loadImage} from "../image/store";
 
 export type ExportFormat = "txt" | "epub";
 
 /** 导出当前浏览路径上的 AI 正文（assistant 消息），指令消息不进入成书。 */
 function exportableChapters(conversation: Conversation): MessageNode[] {
   return resolvePath(conversation)
-      .filter((node) => node.role === "assistant" && node.content.trim().length > 0);
+      .filter((node) => node.role === "assistant"
+          && node.segments.some((segment) => segment.type === "image"
+              || segment.text.trim().length > 0));
+}
+
+/** 正文中的插图占位文本，TXT 用它标记图片位置。 */
+function imagePlaceholder(prompt: string): string {
+  return prompt ? `[插图：${prompt}]` : "[插图]";
 }
 
 export function buildTxt(conversation: Conversation): string {
   const chapters = exportableChapters(conversation);
-  const body = chapters.map((node) => node.content.trim()).join("\n\n");
+  const body = chapters
+      .map((node) => node.segments
+          .map((segment) => segment.type === "text"
+              ? segment.text.trim()
+              : imagePlaceholder(segment.prompt))
+          .filter(Boolean)
+          .join("\n\n"))
+      .join("\n\n");
   return `${conversation.title}\n\n${body}\n`;
 }
 
@@ -24,34 +39,81 @@ function escapeXml(text: string): string {
       .replace(/"/g, "&quot;");
 }
 
-function chapterXhtml(title: string, content: string): string {
-  const paragraphs = content
+function paragraphsHtml(content: string): string {
+  return content
       .split(/\n{2,}/)
       .map((paragraph) => paragraph.trim())
       .filter(Boolean)
       .map((paragraph) => `<p>${escapeXml(paragraph).replace(/\n/g, "<br/>")}</p>`)
       .join("\n");
+}
+
+function chapterXhtml(title: string, bodyHtml: string): string {
   return `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN">
-<head><title>${escapeXml(title)}</title></head>
+<head><title>${escapeXml(title)}</title><link rel="stylesheet" type="text/css" href="style.css"/></head>
 <body>
 <h2>${escapeXml(title)}</h2>
-${paragraphs}
+${bodyHtml}
 </body>
 </html>`;
 }
 
-/** 生成最小可用 EPUB 3 包（mimetype 首个且不压缩，其余文件存储式打包）。 */
-export function buildEpub(conversation: Conversation): Uint8Array {
+/** 扩展名与 media-type 对应关系，EPUB manifest 需要逐项声明。 */
+function imageFileMeta(mimeType: string): {extension: string; mediaType: string} {
+  if (mimeType === "image/jpeg") return {extension: "jpg", mediaType: "image/jpeg"};
+  if (mimeType === "image/webp") return {extension: "webp", mediaType: "image/webp"};
+  if (mimeType === "image/gif") return {extension: "gif", mediaType: "image/gif"};
+  if (mimeType === "image/png") return {extension: "png", mediaType: "image/png"};
+  // 未知格式必须明确失败，禁止用错误的 media-type 写出阅读器无法渲染的图片
+  throw new Error(`不支持的插图格式：${mimeType || "未知"}`);
+}
+
+interface ChapterImage {
+  imageId: string;
+  fileName: string;
+  mediaType: string;
+  bytes: Uint8Array;
+}
+
+/**
+ * 生成最小可用 EPUB 3 包（mimetype 首个且不压缩，其余文件存储式打包）。
+ * 插图从本地仓库读取后与正文一起打包；任一图片缺失时终止导出，
+ * 避免产出正文有图位但没有图片的电子书。
+ */
+export async function buildEpub(conversation: Conversation): Promise<Uint8Array> {
   const chapters = exportableChapters(conversation);
   const title = conversation.title || "未命名作品";
   const bookId = `gugle-novel-${conversation.id}`;
   const chapterFiles = chapters.map((_, index) => `chapter-${index + 1}.xhtml`);
+  const images = new Map<string, ChapterImage>();
+  const chapterBodies: string[] = [];
 
-  const manifestItems = chapterFiles
-      .map((file, index) => `<item id="ch${index + 1}" href="${file}" media-type="application/xhtml+xml"/>`)
-      .join("\n    ");
+  for (const [chapterIndex, node] of chapters.entries()) {
+    const parts: string[] = [];
+    for (const segment of node.segments) {
+      if (segment.type === "text") {
+        const html = paragraphsHtml(segment.text.trim());
+        if (html) parts.push(html);
+        continue;
+      }
+      // 文件名按导出顺序分配，避免不同图片 id 生成相同文件名而互相覆盖
+      const stored = images.get(segment.imageId)
+          ?? await loadStoredImage(segment.imageId, images.size + 1);
+      images.set(segment.imageId, stored);
+      parts.push(`<div class="illustration"><img src="images/${stored.fileName}" alt="${escapeXml(segment.prompt)}"/></div>`);
+    }
+    const chapterTitle = `${title} · 第 ${chapterIndex + 1} 节`;
+    chapterBodies.push(chapterXhtml(chapterTitle, parts.join("\n")));
+  }
+
+  const imageItems = [...images.values()];
+  const manifestItems = [
+    `<item id="css" href="style.css" media-type="text/css"/>`,
+    ...chapterFiles.map((file, index) => `<item id="ch${index + 1}" href="${file}" media-type="application/xhtml+xml"/>`),
+    ...imageItems.map((image, index) => `<item id="img${index + 1}" href="images/${image.fileName}" media-type="${image.mediaType}"/>`),
+  ].join("\n    ");
   const spineItems = chapterFiles
       .map((_, index) => `<itemref idref="ch${index + 1}"/>`)
       .join("\n    ");
@@ -86,7 +148,7 @@ export function buildEpub(conversation: Conversation): Uint8Array {
     "OEBPS/nav.xhtml": strToU8(`<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh-CN">
-<head><title>${escapeXml(title)}</title></head>
+<head><title>${escapeXml(title)}</title><link rel="stylesheet" type="text/css" href="style.css"/></head>
 <body>
 <nav epub:type="toc">
   <h1>${escapeXml(title)}</h1>
@@ -96,20 +158,41 @@ export function buildEpub(conversation: Conversation): Uint8Array {
 </nav>
 </body>
 </html>`),
+    "OEBPS/style.css": strToU8(`.illustration { margin: 1em 0; text-align: center; }
+.illustration img { max-width: 100%; height: auto; }`),
   };
-  chapters.forEach((node, index) => {
-    files[`OEBPS/${chapterFiles[index]}`] = strToU8(
-        chapterXhtml(`${title} · 第 ${index + 1} 节`, node.content.trim())
-    );
+  chapters.forEach((_, index) => {
+    files[`OEBPS/${chapterFiles[index]}`] = strToU8(chapterBodies[index]);
   });
+  for (const image of imageItems) {
+    files[`OEBPS/images/${image.fileName}`] = image.bytes;
+  }
   return zipSync(files, {level: 0});
 }
 
-export function buildExport(conversation: Conversation, format: ExportFormat): {data: Blob; filename: string} {
+/** index 为本次导出中的序号，保证不同图片得到唯一文件名。 */
+async function loadStoredImage(imageId: string, index: number): Promise<ChapterImage> {
+  const stored = await loadImage(imageId);
+  if (!stored) throw new Error("作品中存在无法读取的插图，请删除该插图后重新导出");
+  const meta = imageFileMeta(stored.mimeType);
+  const bytes = new Uint8Array(await stored.blob.arrayBuffer());
+  return {
+    imageId,
+    fileName: `image-${index}.${meta.extension}`,
+    mediaType: meta.mediaType,
+    bytes,
+  };
+}
+
+export async function buildExport(
+    conversation: Conversation,
+    format: ExportFormat
+): Promise<{data: Blob; filename: string}> {
   const safeTitle = (conversation.title || "未命名作品").replace(/[\\/:*?"<>|]/g, "_");
   if (format === "epub") {
+    const bytes = await buildEpub(conversation);
     return {
-      data: new Blob([buildEpub(conversation).slice().buffer as ArrayBuffer], {type: "application/epub+zip"}),
+      data: new Blob([bytes.slice().buffer as ArrayBuffer], {type: "application/epub+zip"}),
       filename: `${safeTitle}.epub`,
     };
   }

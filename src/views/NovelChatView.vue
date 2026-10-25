@@ -15,8 +15,11 @@ import {
   IconStop,
 } from "@arco-design/web-vue/es/icon";
 import BranchTreePanel from "../components/BranchTreePanel.vue";
+import ChatIllustration from "../components/ChatIllustration.vue";
 import {useVisualViewport} from "../composables/viewport/visual";
 import {renderMarkdown} from "../services/markdown";
+import {messageText} from "../domain/tree";
+import {CONTENT_MODE_LABELS, type ContentMode} from "../domain/prompts";
 
 const props = defineProps<{app: any}>();
 const editingConversationId = ref("");
@@ -72,9 +75,13 @@ function scrollToBottom(force = false) {
 }
 
 const scrollSignal = computed(() => {
-  const path = (props.app.activePath ?? []) as {id: string; content: string; reasoning?: string}[];
+  const path = props.app.activePath ?? [];
   const last = path[path.length - 1];
-  return `${path.length}|${last?.content.length ?? 0}|${last?.reasoning?.length ?? 0}`;
+  // 段落类型与文本长度变化都要触发滚动：插图插入也算一次内容变化
+  const segmentSignal = last?.segments
+      .map((segment: {type: string; text?: string}) => `${segment.type}:${segment.text?.length ?? 0}`)
+      .join(",") ?? "";
+  return `${path.length}|${last?.reasoning?.length ?? 0}|${segmentSignal}`;
 });
 
 watch(() => props.app.activeConversationId, () => {
@@ -119,6 +126,20 @@ function isThinkingMessage(message: any): boolean {
   if (!props.app.generating) return false;
   const path = props.app.activePath ?? [];
   return path[path.length - 1]?.id === message.id;
+}
+
+/** 复制与标题只取正文文本，插图由其提示词代替。 */
+function copyableText(message: any): string {
+  return messageText(message);
+}
+
+const contentModeLabels: Record<ContentMode, string> = CONTENT_MODE_LABELS;
+const contentModes: ContentMode[] = ["sfw", "nsfw"];
+const contentModeLabel = (mode: ContentMode): string => contentModeLabels[mode];
+
+/** 切换内容模式后，预览当前会追加的生图提示词。 */
+function switchContentMode(mode: ContentMode) {
+  props.app.contentMode = mode;
 }
 </script>
 
@@ -168,7 +189,7 @@ function isThinkingMessage(message: any): boolean {
                     type="text" shape="circle" size="mini"
                     :title="app.copiedMessageId === message.id ? '已复制' : '复制消息'"
                     :aria-label="app.copiedMessageId === message.id ? '已复制' : '复制消息'"
-                    @click="app.copyMessage(message.id, message.content)"
+                    @click="app.copyMessage(message.id, copyableText(message))"
                 >
                   <IconCheck v-if="app.copiedMessageId === message.id"/>
                   <IconCopy v-else/>
@@ -193,8 +214,20 @@ function isThinkingMessage(message: any): boolean {
                 <summary>{{ isThinkingMessage(message) ? '正在思考…' : '思维链' }}</summary>
                 <div class="reasoning-content">{{ message.reasoning }}</div>
               </details>
-              <div v-if="message.role === 'assistant'" class="message-content markdown-body" v-html="renderMarkdown(message.content)"></div>
-              <p v-else class="message-content">{{ message.content }}</p>
+              <template v-if="message.role === 'assistant'">
+                <template v-for="(segment, segmentIndex) in message.segments" :key="`${message.id}-${segmentIndex}`">
+                  <div
+                      v-if="segment.type === 'text'"
+                      class="message-content markdown-body"
+                      v-html="renderMarkdown(segment.text)"
+                  ></div>
+                  <ChatIllustration v-else :image-id="segment.imageId" :prompt="segment.prompt"/>
+                </template>
+                <div v-if="app.illustratingMessageId === message.id" class="chat-illustration-loading">
+                  正在生成插图…
+                </div>
+              </template>
+              <p v-else class="message-content">{{ copyableText(message) }}</p>
             </template>
             <div v-if="message.modelLabel" class="chat-message-model">{{ message.modelLabel }}</div>
           </article>
@@ -246,6 +279,31 @@ function isThinkingMessage(message: any): boolean {
                 />
                 <a-button size="small" title="修改当前会话的系统提示词" @click="app.systemPromptEditorOpen = true">编辑提示词</a-button>
               </div>
+            </div>
+            <div class="field">
+              <label>内容模式</label>
+              <a-radio-group
+                  :model-value="app.contentMode"
+                  type="button"
+                  @change="(value: string | number | boolean) => switchContentMode(String(value) as ContentMode)"
+              >
+                <a-radio v-for="mode in contentModes" :key="mode" :value="mode">
+                  {{ contentModeLabel(mode) }}
+                </a-radio>
+              </a-radio-group>
+              <p class="field-label">
+                {{ app.contentMode === 'nsfw'
+                  ? '成人向：正文与插图可保持相同尺度；生图模型不支持 NSFW 时插图提示词会被要求改写为全年龄内容。'
+                  : '全年龄：由文本模型自行判断插图提示词是否符合全年龄要求。' }}
+              </p>
+            </div>
+            <div class="field">
+              <a-checkbox :model-value="app.illustrationEnabled" @change="app.illustrationEnabled = $event">
+                在正文中生成插图
+              </a-checkbox>
+              <p v-if="app.illustrationEnabled" class="field-label">
+                每 {{ app.illustrationParagraphInterval }} 个正文段落最多 1 张，图像模型：{{ app.resolvedImageModel?.model.displayName || app.resolvedImageModel?.model.id || '未配置' }}
+              </p>
             </div>
             <div class="composer-config-actions">
               <a-button size="small" @click="app.branchPanelOpen = true; configPanelOpen = false">
@@ -340,8 +398,31 @@ function isThinkingMessage(message: any): boolean {
           </div>
         </div>
         <details class="prompt-preview">
-          <summary>预览渲染后的提示词</summary>
+          <summary>预览渲染后的系统提示词</summary>
           <pre>{{ app.renderedSystemPrompt }}</pre>
+        </details>
+        <div class="field">
+          <label>SFW 插图提示词</label>
+          <a-textarea
+              :model-value="app.activeConversation?.illustrationPrompts?.sfw ?? ''"
+              :auto-size="{minRows: 4, maxRows: 10}"
+              @update:model-value="(value: string) => app.updateIllustrationPrompt('sfw', value)"
+          />
+        </div>
+        <div class="field">
+          <label>NSFW 插图提示词</label>
+          <a-textarea
+              :model-value="app.activeConversation?.illustrationPrompts?.nsfw ?? ''"
+              :auto-size="{minRows: 4, maxRows: 10}"
+              @update:model-value="(value: string) => app.updateIllustrationPrompt('nsfw', value)"
+          />
+          <p class="field-label">
+            插图开启时按当前内容模式追加到系统提示词；图像模型不支持 NSFW 时会另行追加全年龄约束。
+          </p>
+        </div>
+        <details class="prompt-preview">
+          <summary>预览当前内容模式下的生图提示词</summary>
+          <pre>{{ app.renderedIllustrationPrompt }}</pre>
         </details>
       </div>
     </a-modal>
@@ -352,7 +433,7 @@ function isThinkingMessage(message: any): boolean {
         @cancel="app.exportModalOpen = false"
     >
       <div class="export-options">
-        <p class="field-label">导出当前浏览路径上的 AI 正文，写作指令不会包含在成书中。</p>
+        <p class="field-label">导出当前浏览路径上的 AI 正文，写作指令不会包含在成书中。EPUB 会把正文中的插图一并打包。</p>
         <a-button long size="large" :loading="app.exporting" @click="app.performExport('txt')">
           导出为 TXT（纯文本）
         </a-button>

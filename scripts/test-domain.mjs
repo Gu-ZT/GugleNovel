@@ -1,0 +1,190 @@
+/* eslint-disable no-console */
+// 领域逻辑验证：分段消息、段落后插图频率、提示词组合与工具参数解析。
+const tree = await import(new URL("./domain-tree-bundle.mjs", import.meta.url).href);
+const prompts = await import(new URL("./domain-prompts-bundle.mjs", import.meta.url).href);
+const illustration = await import(new URL("./domain-illustration-bundle.mjs", import.meta.url).href);
+const generation = await import(new URL("./generation-bundle.mjs", import.meta.url).href);
+
+let failures = 0;
+function check(name, ok) {
+  console.log(`${ok ? "PASS" : "FAIL"}: ${name}`);
+  if (!ok) failures++;
+}
+
+// --- 分段消息 ---
+const node = {id: "n1", parentId: null, childrenIds: [], role: "assistant", segments: [], createdAt: 1};
+tree.appendTextSegment(node, "第一段\n\n第二段");
+check("appendTextSegment 写入首个文本段", node.segments.length === 1 && node.segments[0].text.includes("第二段"));
+
+tree.appendImageSegment(node, "img-1", "雨夜街灯");
+check("appendImageSegment 追加图片段", node.segments.length === 2 && node.segments[1].type === "image");
+
+tree.appendTextSegment(node, "第三段");
+check("插图之后的文本另起一段", node.segments.length === 3 && node.segments[2].type === "text");
+
+check("messageText 忽略图片", !tree.messageText(node).includes("雨夜街灯"));
+check("messageContextText 用占位代替图片", tree.messageContextText(node).includes("[插图：雨夜街灯]"));
+
+// --- 段落计数与频率 ---
+check("countParagraphs 按空行分段", tree.countParagraphs("一段\n\n二段\n\n三段") === 3);
+check("countParagraphs 忽略空块", tree.countParagraphs("一段\n\n\n\n二段") === 2);
+
+const intervalNode = {
+  id: "n2", parentId: null, childrenIds: [], role: "assistant", segments: [], createdAt: 1,
+};
+tree.appendTextSegment(intervalNode, "一\n\n二");
+check("未达间隔时段落数为 2", tree.paragraphsSinceLastImage(intervalNode) === 2);
+tree.appendTextSegment(intervalNode, "\n\n三");
+check("同一文本段内段落连续累加", tree.paragraphsSinceLastImage(intervalNode) === 3);
+tree.appendImageSegment(intervalNode, "img-2", "插图");
+check("插图之后计数归零", tree.paragraphsSinceLastImage(intervalNode) === 0);
+tree.appendTextSegment(intervalNode, "四");
+check("插图之后重新累计", tree.paragraphsSinceLastImage(intervalNode) === 1);
+
+// 段落间隔按单条助手回复独立计算：上一条回复写满段落也不计入本条回复
+const previousNode = {
+  id: "prev", parentId: null, childrenIds: [], role: "assistant", segments: [], createdAt: 1,
+};
+tree.appendTextSegment(previousNode, "前一段\n\n前二段\n\n前三段");
+const freshNode = {
+  id: "fresh", parentId: "prev", childrenIds: [], role: "assistant", segments: [], createdAt: 2,
+};
+check("上一条回复的段落不计入本条回复", tree.paragraphsSinceLastImage(freshNode) === 0);
+tree.appendTextSegment(freshNode, "本条第一段\n\n本条第二段");
+check("本条回复独立累计段落", tree.paragraphsSinceLastImage(freshNode) === 2);
+
+// CRLF 与单换行分段的兼容
+check("CRLF 段落计数正确", tree.countParagraphs("一\r\n\r\n二\r\n\r\n三") === 3);
+check("单换行分段按行计数", tree.countParagraphs("一\n二\n三") === 3);
+
+// --- 旧数据迁移与损坏数据 ---
+const migrated = tree.normalizeConversations([{
+  id: "c1",
+  nodes: {
+    n1: {id: "n1", parentId: null, childrenIds: ["n2"], role: "user", content: "旧版正文", createdAt: 1},
+    n2: {id: "n2", parentId: "n1", childrenIds: [], role: "assistant", content: "旧版回复", createdAt: 2},
+  },
+  rootIds: ["n1"],
+  activeLeafId: "n2",
+}]);
+check("旧版 content 迁移为文本段", migrated[0].nodes.n1.segments[0].text === "旧版正文");
+check("迁移后路径完整", tree.resolvePath(migrated[0]).length === 2);
+
+const brokenNodes = tree.normalizeNodes({
+  a: {id: "a", parentId: "missing", childrenIds: ["b"], role: "assistant", content: "x"},
+  b: {id: "b", parentId: "a", childrenIds: ["ghost"], role: "assistant", content: "y"},
+});
+check("孤儿节点降级为根", brokenNodes.a.parentId === null);
+check("失效子节点被剔除", brokenNodes.b.childrenIds.length === 0);
+check("节点 segments 一定存在", Array.isArray(brokenNodes.a.segments));
+
+// --- 生图工具 ---
+const sfwTool = illustration.buildIllustrationTool({
+  contentMode: "sfw",
+  imageModelAllowsNsfw: true,
+  paragraphInterval: 3,
+});
+check("工具名为 insert_illustration", sfwTool.function.name === illustration.ILLUSTRATION_TOOL_NAME);
+check("SFW 工具描述使用全年龄内容规则", sfwTool.function.description.includes(illustration.SFW_ILLUSTRATION_CONTENT_RULE));
+check("工具描述写入段落间隔", sfwTool.function.description.includes("3 个段落"));
+check("工具参数只要求 prompt", Array.isArray(sfwTool.function.parameters.required)
+  && sfwTool.function.parameters.required.length === 1
+  && sfwTool.function.parameters.required[0] === "prompt");
+
+const nsfwTool = illustration.buildIllustrationTool({
+  contentMode: "nsfw",
+  imageModelAllowsNsfw: true,
+  paragraphInterval: 3,
+});
+check(
+  "NSFW + 支持图像模型时使用成人向规则",
+  nsfwTool.function.description.includes(illustration.NSFW_ILLUSTRATION_CONTENT_RULE)
+  && !nsfwTool.function.description.includes(illustration.SFW_ILLUSTRATION_CONTENT_RULE),
+);
+
+const nsfwSafeTool = illustration.buildIllustrationTool({
+  contentMode: "nsfw",
+  imageModelAllowsNsfw: false,
+  paragraphInterval: 3,
+});
+check(
+  "NSFW + 不支持图像模型时退回全年龄规则",
+  nsfwSafeTool.function.description.includes(illustration.SFW_ILLUSTRATION_CONTENT_RULE),
+);
+
+check("解析合法参数", illustration.parseIllustrationPrompt("{\"prompt\":\" 雨夜街灯 \"}") === "雨夜街灯");
+check("空提示词返回 null", illustration.parseIllustrationPrompt("{\"prompt\":\"   \"}") === null);
+check("非法 JSON 返回 null", illustration.parseIllustrationPrompt("not json") === null);
+check("缺字段返回 null", illustration.parseIllustrationPrompt("{}") === null);
+
+// --- 系统提示词组合 ---
+function makeRuntime(overrides = {}) {
+  return {
+    model: {provider: {}, model: {id: "m", capabilities: ["text", "tools"]}},
+    connection: {},
+    temperature: 0.9,
+    maxTokens: 1024,
+    stream: true,
+    systemPrompt: "你是小说作家",
+    illustration: {
+      enabled: true,
+      contentMode: "sfw",
+      paragraphInterval: 3,
+      systemPrompt: "插图规则",
+      imageModel: {provider: {}, model: {id: "img", supportsNsfw: false}},
+      ...overrides,
+    },
+  };
+}
+
+const sfwComposed = generation.composeSystemPrompt(makeRuntime());
+check("SFW 组合包含生图提示词", sfwComposed.includes("插图规则"));
+check("SFW 不追加 NSFW 限制", !sfwComposed.includes(prompts.SFW_ONLY_ILLUSTRATION_CONSTRAINT));
+
+const nsfwComposed = generation.composeSystemPrompt(makeRuntime({contentMode: "nsfw"}));
+check(
+  "NSFW + 图像模型不支持时追加限制",
+  nsfwComposed.includes(prompts.SFW_ONLY_ILLUSTRATION_CONSTRAINT),
+);
+
+const nsfwAllowed = generation.composeSystemPrompt(makeRuntime({
+  contentMode: "nsfw",
+  imageModel: {provider: {}, model: {id: "img", supportsNsfw: true}},
+}));
+check("NSFW + 图像模型支持时不追加限制", !nsfwAllowed.includes("只接受全年龄内容"));
+
+const disabled = generation.composeSystemPrompt(makeRuntime({enabled: false, systemPrompt: "不该出现"}));
+check("关闭插图时不注入生图提示词", !disabled.includes("不该出现") && !disabled.includes("全年龄"));
+
+// --- 上下文裁剪 ---
+const conversation = {
+  id: "c2", title: "t", createdAt: 1, systemPrompt: "sys", variables: {},
+  nodes: {
+    u1: {id: "u1", parentId: null, childrenIds: ["a1"], role: "user", segments: [{type: "text", text: "写一段"}], createdAt: 1},
+    a1: {id: "a1", parentId: "u1", childrenIds: [], role: "assistant",
+      segments: [{type: "text", text: "正文"}, {type: "image", imageId: "i1", prompt: "画面"}], createdAt: 2},
+  },
+  rootIds: ["u1"],
+  activeLeafId: "a1",
+};
+const requestMessages = generation.buildRequestMessages(conversation, "system", 128000);
+check("请求消息首条为系统提示词", requestMessages[0].role === "system");
+check("图片以占位进入上下文", requestMessages.at(-1).content.includes("[插图：画面]"));
+
+const tinyBudget = generation.buildRequestMessages(conversation, "system", 1);
+check("超预算时仍保留系统提示词", tinyBudget[0]?.role === "system");
+check("超预算时保留最新一条消息", tinyBudget.at(-1)?.content.includes("[插图：画面]"));
+check("超预算时裁掉更早的消息", !tinyBudget.some((message) => message.content === "写一段"));
+
+// --- 默认提示词 ---
+const preset = prompts.defaultPromptPreset();
+check("默认预设包含 SFW 生图提示词", preset.sfwIllustrationPrompt.length > 0);
+check("默认预设包含 NSFW 生图提示词", preset.nsfwIllustrationPrompt.length > 0);
+check("默认预设为内置预设", preset.isDefault === true);
+
+const normalized = prompts.normalizePromptPresets([{id: "custom", name: "自定义", systemPrompt: "正文"}]);
+check("自定义预设补齐生图提示词", normalized[1].sfwIllustrationPrompt.length > 0);
+check("缺失内置预设时自动补回", normalized[0].id === prompts.DEFAULT_PROMPT_PRESET_ID);
+
+console.log(failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`);
+process.exit(failures === 0 ? 0 : 1);

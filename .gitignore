@@ -10,4 +10,10 @@ scripts/transport.mjs
 scripts/api-bundle.mjs
 scripts/novel-bundle.cjs
 scripts/viewport-bundle.mjs
-
+scripts/image-bundle.mjs
+scripts/export-bundle.mjs
+scripts/fflate-bundle.mjs
+scripts/domain-tree-bundle.mjs
+scripts/domain-prompts-bundle.mjs
+scripts/domain-illustration-bundle.mjs
+scripts/generation-bundle.mjs

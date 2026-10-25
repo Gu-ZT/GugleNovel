@@ -282,6 +282,50 @@
   font-size: 11px;
 }
 
+/* 插图：按正文宽度等比展示，提示词作为图注；数据缺失时保留可读占位 */
+.chat-illustration {
+  margin: 12px 0;
+  text-align: center;
+}
+
+.chat-illustration img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+}
+
+.chat-illustration figcaption {
+  margin-top: 6px;
+  color: var(--color-text-4);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
+  word-break: break-word;
+}
+
+.chat-illustration-loading {
+  padding: 24px 12px;
+  margin: 12px 0;
+  color: var(--color-text-3);
+  font-size: 13px;
+  text-align: center;
+  background: var(--color-fill-1);
+  border: 1px dashed var(--color-border-2);
+  border-radius: 8px;
+}
+
+.chat-illustration-missing {
+  padding: 16px 12px;
+  margin: 12px 0;
+  color: var(--color-text-3);
+  font-size: 13px;
+  text-align: center;
+  background: var(--color-fill-1);
+  border: 1px dashed var(--color-border-2);
+  border-radius: 8px;
+}
+
 .message-edit {
   display: flex;
   flex-direction: column;

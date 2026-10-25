@@ -2,10 +2,14 @@ import {computed, ref, watch} from "vue";
 import {
   ACTIVE_CONVERSATION_KEY,
   CONVERSATIONS_KEY,
+  appendImageSegment,
+  appendTextSegment,
+  conversationImageIds,
   createConversation,
   createNodeId,
   estimatePathTokens,
   flattenTree,
+  messageText,
   normalizeConversations,
   pathBranches,
   resolvePath,
@@ -15,18 +19,25 @@ import {
   type MessageNode,
 } from "../../../domain/tree";
 import {OpenAIConnection} from "../../../api";
-import {renderPromptVariables} from "../../../domain/prompts";
-import {resolvedModelLabel, type ResolvedModel} from "../../../domain/models";
 import {
-  isAbortError,
-  requestChatCompletion,
-  type ChatRequestMessage,
-} from "../../../services/transport";
+  renderPromptVariables,
+  type ContentMode,
+  type PromptPreset,
+} from "../../../domain/prompts";
+import {resolvedModelLabel, type ResolvedModel} from "../../../domain/models";
+import {isAbortError, requestChatCompletion} from "../../../services/transport";
 import {buildExport, saveFileToDisk, type ExportFormat} from "../../../services/export";
+import {deleteImages} from "../../../services/image/store";
 import {loadJson, saveJson} from "../../../services/storage";
 import type {ProviderSettings} from "../../settings/provider";
 import type {PromptSettings} from "../../settings/prompt";
 import type {GenerationSettings} from "../../settings/generation";
+import {
+  buildRequestMessages,
+  composeSystemPrompt,
+  runGeneration,
+  type GenerationOptions,
+} from "./generation";
 
 interface NovelWorkspaceOptions {
   provider: ProviderSettings;
@@ -63,6 +74,8 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
   const systemPromptEditorOpen = ref(false);
   const exportModalOpen = ref(false);
   const exporting = ref(false);
+  /** 正在等待图像模型的助手节点，用于在调用位置显示进度 */
+  const illustratingMessageId = ref("");
   let abortController: AbortController | null = null;
   let copyTimer: number | null = null;
 
@@ -84,6 +97,10 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
 
   const resolvedModel = computed(() => options.provider.resolveModelSelection(
       options.provider.modelSelection.value
+  ));
+
+  const resolvedImageModel = computed(() => options.provider.resolveImageModelSelection(
+      options.provider.imageModelSelection.value
   ));
 
   const contextUsage = computed(() => {
@@ -126,19 +143,43 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
   }
 
   function renderSystemPrompt(conversation: Conversation): string {
-    return renderPromptVariables(conversation.systemPrompt, {
+    return renderPromptVariables(conversation.systemPrompt, promptVariables(conversation));
+  }
+
+  function promptVariables(conversation: Conversation): Record<string, string> {
+    return {
       date: new Date().toLocaleDateString("zh-CN"),
       time: new Date().toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit"}),
       model_name: resolvedModel.value?.model.id ?? "",
       genre: conversation.variables.genre || "不限",
       style: conversation.variables.style || "不限",
-    });
+    };
+  }
+
+  /** 会话当前生效的生图提示词：优先会话快照，空值或缺省时回落到激活预设。 */
+  function illustrationPromptFor(conversation: Conversation, mode: ContentMode): string {
+    const snapshot = conversation.illustrationPrompts;
+    const preset = options.prompt.activePreset.value;
+    const saved = mode === "nsfw" ? snapshot?.nsfw : snapshot?.sfw;
+    const fallback = mode === "nsfw" ? preset?.nsfwIllustrationPrompt : preset?.sfwIllustrationPrompt;
+    // 空串视为未配置，否则编辑会话提示词后会挡住预设回落
+    const source = saved && saved.trim() ? saved : fallback;
+    return renderPromptVariables(source ?? "", promptVariables(conversation));
+  }
+
+  function presetSnapshot(preset: PromptPreset | undefined): {sfw: string; nsfw: string} | undefined {
+    if (!preset) return undefined;
+    return {sfw: preset.sfwIllustrationPrompt, nsfw: preset.nsfwIllustrationPrompt};
   }
 
   function createNewConversation() {
     if (generating.value) return;
     const preset = options.prompt.activePreset.value;
-    const conversation = createConversation(preset?.systemPrompt ?? "", preset?.id);
+    const conversation = createConversation(
+        preset?.systemPrompt ?? "",
+        preset?.id,
+        presetSnapshot(preset)
+    );
     conversations.value = [...conversations.value, conversation];
     activeConversationId.value = conversation.id;
     editingMessageId.value = "";
@@ -158,11 +199,16 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     mutateConversation(id, (conversation) => { conversation.title = trimmed; });
   }
 
-  function deleteConversation(id: string) {
-    conversations.value = conversations.value.filter((conversation) => conversation.id !== id);
+  async function deleteConversation(id: string) {
+    if (generating.value) return;
+    const target = conversations.value.find((conversation) => conversation.id === id);
+    const removedImageIds = target ? new Set(conversationImageIds(target)) : new Set<string>();
+    const remaining = conversations.value.filter((conversation) => conversation.id !== id);
+    conversations.value = remaining;
     if (activeConversationId.value === id) {
-      activeConversationId.value = conversations.value[0]?.id ?? "";
+      activeConversationId.value = remaining[0]?.id ?? "";
     }
+    if (removedImageIds.size > 0) await pruneImages(removedImageIds);
   }
 
   function updateSystemPrompt(prompt: string) {
@@ -171,13 +217,28 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     mutateConversation(conversation.id, (target) => { target.systemPrompt = prompt; });
   }
 
+  function updateIllustrationPrompt(mode: ContentMode, prompt: string) {
+    const conversation = activeConversation.value;
+    if (!conversation) return;
+    // 旧会话没有快照时先补齐两种模式的当前生效值，避免编辑一种模式把另一种写成空串
+    const current = conversation.illustrationPrompts ?? {
+      sfw: illustrationPromptFor(conversation, "sfw"),
+      nsfw: illustrationPromptFor(conversation, "nsfw"),
+    };
+    mutateConversation(conversation.id, (target) => {
+      target.illustrationPrompts = mode === "nsfw"
+          ? {...current, nsfw: prompt}
+          : {...current, sfw: prompt};
+    });
+  }
+
   function updateConversationVariable(key: string, value: string) {
     const conversation = activeConversation.value;
     if (!conversation) return;
     mutateConversation(conversation.id, (target) => { target.variables[key] = value; });
   }
 
-  /** 将提示词预设应用到当前会话（覆盖会话级提示词快照）。 */
+  /** 将提示词预设应用到当前会话（覆盖会话级提示词与生图提示词快照）。 */
   function applyPreset(presetId: string) {
     const preset = options.prompt.presets.value.find((item) => item.id === presetId);
     const conversation = activeConversation.value;
@@ -185,6 +246,10 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     mutateConversation(conversation.id, (target) => {
       target.systemPrompt = preset.systemPrompt;
       target.presetId = preset.id;
+      target.illustrationPrompts = {
+        sfw: preset.sfwIllustrationPrompt,
+        nsfw: preset.nsfwIllustrationPrompt,
+      };
     });
   }
 
@@ -192,12 +257,13 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     const conversation = activeConversation.value;
     if (!conversation || exporting.value) return;
     exporting.value = true;
+    error.value = "";
     try {
-      const {data, filename} = buildExport(conversation, format);
+      const {data, filename} = await buildExport(conversation, format);
       const saved = await saveFileToDisk(filename, data);
       if (saved) exportModalOpen.value = false;
-    } catch {
-      error.value = "导出失败，请重试";
+    } catch (exportError) {
+      error.value = exportError instanceof Error ? exportError.message : "导出失败，请重试";
     } finally {
       exporting.value = false;
     }
@@ -220,27 +286,43 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     return new OpenAIConnection(model.provider.endpoint, model.provider.apiKey);
   }
 
-  /** 组装请求消息：渲染后的系统提示词 + 当前路径消息，按模型上下文预算从旧到新裁剪。 */
-  function buildRequestMessages(conversation: Conversation): ChatRequestMessage[] {
-    const system = renderSystemPrompt(conversation);
-    const path = resolvePath(conversation);
-    const contextLength = resolvedModel.value?.model.contextLength ?? 128000;
-    const charBudget = contextLength * 4; // 粗略估算：1 token ≈ 4 字符
-    const messages: ChatRequestMessage[] = [];
-    let used = system.length;
-    for (let index = path.length - 1; index >= 0; index--) {
-      const node = path[index];
-      if (used + node.content.length > charBudget && messages.length > 0) break;
-      messages.unshift({role: node.role, content: node.content});
-      used += node.content.length;
+  /**
+   * 插图配置检查：返回给用户看的提示与是否需要阻断生成。
+   * 除 NSFW 正文能力缺失外，其余问题都降级为只写正文，避免整体拦死生成。
+   */
+  const illustrationStatus = computed(() => {
+    const generation = options.generation;
+    const model = resolvedModel.value;
+    const imageModel = resolvedImageModel.value;
+    // NSFW 正文能力与插图开关无关：主模型未标记支持时禁止发出成人向正文
+    if (generation.contentMode.value === "nsfw" && !model?.model.supportsNsfw) {
+      return {
+        blocking: "当前内容模式为 NSFW，但当前文本模型未标记支持 NSFW，请更换模型或切回 SFW",
+        warning: "",
+      };
     }
-    return [
-      ...(system.trim() ? [{role: "system" as const, content: system}] : []),
-      ...messages,
-    ];
-  }
+    if (!generation.illustrationEnabled.value) {
+      return {blocking: "", warning: ""};
+    }
+    if (!model) {
+      return {blocking: "", warning: ""};
+    }
+    // 主模型缺少工具能力时插图一定无法触发，此提示优先于图像模型配置
+    if (!model.model.capabilities.includes("tools")) {
+      return {blocking: "", warning: "插图功能已开启，但当前文本模型未标记支持工具调用，本次只生成正文"};
+    }
+    if (!imageModel) {
+      return {blocking: "", warning: "插图功能已开启，但尚未选择图像模型，本次只生成正文"};
+    }
+    if (generation.contentMode.value === "nsfw" && !imageModel.model.supportsNsfw) {
+      return {
+        blocking: "",
+        warning: "图像模型未标记支持 NSFW：正文保持成人向，插图提示词会被要求改写为全年龄内容",
+      };
+    }
+    return {blocking: "", warning: ""};
+  });
 
-  /** 基于当前活动叶子发起一次真实生成：先构建消息，再追加助手占位节点并流式写入。 */
   function startGeneration(conversationId: string) {
     const model = resolvedModel.value;
     if (!model) {
@@ -249,68 +331,104 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     }
     const conversation = conversations.value.find((item) => item.id === conversationId);
     if (!conversation) return;
-    const messages = buildRequestMessages(conversation);
+    const generation = options.generation;
+    // NSFW 正文要求主模型标记支持；其余插图问题降级为只写正文
+    const status = illustrationStatus.value;
+    if (status.blocking) {
+      error.value = status.blocking;
+      return;
+    }
+    const options_: GenerationOptions = {
+      model,
+      connection: connectionFor(model),
+      temperature: generation.temperature.value,
+      maxTokens: generation.outputTokenOverride.value > 0
+          ? generation.outputTokenOverride.value
+          : model.model.maxOutputTokens,
+      stream: model.model.capabilities.includes("streaming"),
+      systemPrompt: renderSystemPrompt(conversation),
+      illustration: {
+        enabled: generation.illustrationEnabled.value,
+        contentMode: generation.contentMode.value,
+        paragraphInterval: generation.illustrationParagraphInterval.value,
+        systemPrompt: illustrationPromptFor(conversation, generation.contentMode.value),
+        imageModel: resolvedImageModel.value,
+      },
+    };
+    const systemPrompt = composeSystemPrompt(options_);
+    const messages = buildRequestMessages(conversation, systemPrompt, model.model.contextLength);
     if (messages.length === 0 || messages[messages.length - 1].role !== "user") {
       error.value = "请先发送写作指令";
       return;
     }
     generating.value = true;
-    error.value = "";
+    error.value = status.warning;
     const assistantNode: MessageNode = {
       id: createNodeId(),
       parentId: conversation.activeLeafId || null,
       childrenIds: [],
       role: "assistant",
-      content: "",
+      segments: [],
       modelLabel: resolvedModelLabel(model),
       createdAt: Date.now() + 1,
     };
     mutateConversation(conversationId, (target) => appendNode(target, assistantNode));
     const controller = new AbortController();
     abortController = controller;
-    const outputOverride = options.generation.outputTokenOverride.value;
-    void requestChatCompletion({
-      connection: connectionFor(model),
-      model: model.model.id,
-      messages,
-      temperature: options.generation.temperature.value,
-      maxTokens: outputOverride > 0 ? outputOverride : model.model.maxOutputTokens,
-      stream: model.model.capabilities.includes("streaming"),
-      signal: controller.signal,
-      onDelta: (text) => {
+    illustratingMessageId.value = "";
+    void runGeneration(options_, messages, controller.signal, {
+      onTextDelta: (delta) => {
         mutateConversation(conversationId, (target) => {
           const node = target.nodes[assistantNode.id];
-          if (node) node.content = text;
+          if (node) appendTextSegment(node, delta);
         });
       },
-      onReasoningDelta: (reasoning) => {
+      onReasoning: (reasoning) => {
         mutateConversation(conversationId, (target) => {
           const node = target.nodes[assistantNode.id];
           if (node) node.reasoning = reasoning;
         });
       },
-    }).then((text) => {
-      mutateConversation(conversationId, (target) => {
-        const node = target.nodes[assistantNode.id];
-        if (node && text.trim()) node.content = text;
-      });
+      onIllustrationStart: () => {
+        illustratingMessageId.value = assistantNode.id;
+      },
+      onIllustration: (imageId, prompt) => {
+        illustratingMessageId.value = "";
+        mutateConversation(conversationId, (target) => {
+          const node = target.nodes[assistantNode.id];
+          if (node) appendImageSegment(node, imageId, prompt);
+        });
+      },
+      onIllustrationFailed: (reason) => {
+        illustratingMessageId.value = "";
+        if (!error.value) error.value = `插图生成失败：${reason}`;
+      },
+    }).then(() => {
+      // 用户停止后不应再触发标题生成，保持停止语义完整
+      if (controller.signal.aborted) return;
       void maybeGenerateTitle(conversationId, model);
     }).catch((reason) => {
+      illustratingMessageId.value = "";
       if (isAbortError(reason)) {
         mutateConversation(conversationId, (target) => {
           const node = target.nodes[assistantNode.id];
-          if (node && !node.content.trim()) node.content = "（已停止，未生成内容）";
+          if (node && messageText(node).trim().length === 0) {
+            appendTextSegment(node, "（已停止，未生成内容）");
+          }
         });
       } else {
         error.value = reason instanceof Error ? reason.message : "生成失败，请重试";
         mutateConversation(conversationId, (target) => {
           const node = target.nodes[assistantNode.id];
-          if (node && !node.content.trim()) node.content = "（生成失败，可删除本节点后重试）";
+          if (node && messageText(node).trim().length === 0) {
+            appendTextSegment(node, "（生成失败，可删除本节点后重试）");
+          }
         });
       }
     }).finally(() => {
       if (abortController === controller) abortController = null;
       generating.value = false;
+      illustratingMessageId.value = "";
     });
   }
 
@@ -323,7 +441,7 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
       parentId: conversation.activeLeafId || null,
       childrenIds: [],
       role: "user",
-      content,
+      segments: [{type: "text", text: content}],
       createdAt: Date.now(),
     };
     mutateConversation(conversation.id, (target) => appendNode(target, userNode));
@@ -335,8 +453,9 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     const conversation = conversations.value.find((item) => item.id === conversationId);
     const firstUserMessage = conversation ? resolvePath(conversation).find((node) => node.role === "user") : null;
     if (!conversation || !firstUserMessage || conversation.title !== "新对话") return;
+    const firstLine = messageText(firstUserMessage).trim().split("\n", 1)[0].slice(0, 24);
     mutateConversation(conversationId, (target) => {
-      target.title = firstUserMessage.content.trim().split("\n", 1)[0].slice(0, 24) || target.title;
+      target.title = firstLine || target.title;
     });
   }
 
@@ -360,13 +479,13 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
           },
           {
             role: "user",
-            content: `用户: ${firstUser.content}\n\n助手: ${(firstAssistant?.content ?? "").slice(0, 600)}`,
+            content: `用户: ${messageText(firstUser)}\n\n助手: ${firstAssistant ? messageText(firstAssistant).slice(0, 600) : ""}`,
           },
         ],
         stream: false,
         signal: new AbortController().signal,
       });
-      const cleaned = title.replace(/^[\s"'“”]+|[\s"'“”]+$/g, "").split("\n", 1)[0].slice(0, 40);
+      const cleaned = title.text.replace(/^[\s"'“”]+|[\s"'“”]+$/g, "").split("\n", 1)[0].slice(0, 40);
       mutateConversation(conversationId, (target) => {
         if (target.title === "新对话" && cleaned) target.title = cleaned;
       });
@@ -385,6 +504,11 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     if (!conversation || generating.value) return;
     const node = conversation.nodes[nodeId];
     if (!node || node.role !== "assistant" || !node.parentId) return;
+    // 配置阻断时不要先回退活动叶子，否则原回复会从当前路径上消失
+    if (illustrationStatus.value.blocking) {
+      error.value = illustrationStatus.value.blocking;
+      return;
+    }
     mutateConversation(conversation.id, (target) => { target.activeLeafId = node.parentId!; });
     startGeneration(conversation.id);
   }
@@ -394,7 +518,7 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     const node = activeConversation.value?.nodes[nodeId];
     if (!node || generating.value) return;
     editingMessageId.value = nodeId;
-    editingContent.value = node.content;
+    editingContent.value = messageText(node);
   }
 
   function cancelEditMessage() {
@@ -415,7 +539,7 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
       parentId: node.parentId,
       childrenIds: [],
       role: node.role,
-      content,
+      segments: [{type: "text", text: content}],
       modelLabel: node.modelLabel,
       createdAt: Date.now(),
     };
@@ -461,12 +585,20 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     mutateConversation(conversation.id, (item) => { item.activeLeafId = leaf; });
   }
 
-  function deleteMessage(nodeId: string) {
+  async function deleteMessage(nodeId: string) {
     const conversation = activeConversation.value;
     if (!conversation || generating.value) return;
     const node = conversation.nodes[nodeId];
     if (!node) return;
     const removed = new Set(subtreeIds(conversation, nodeId));
+    const removedImageIds = new Set<string>();
+    for (const id of removed) {
+      const removedNode = conversation.nodes[id];
+      if (!removedNode) continue;
+      for (const segment of removedNode.segments) {
+        if (segment.type === "image") removedImageIds.add(segment.imageId);
+      }
+    }
     mutateConversation(conversation.id, (target) => {
       for (const id of removed) delete target.nodes[id];
       if (node.parentId === null) {
@@ -479,6 +611,25 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
         target.activeLeafId = node.parentId ?? "";
       }
     });
+    await pruneImages(removedImageIds);
+  }
+
+  /**
+   * 删除不再被任何会话引用的图片。只在删除动作后调用，
+   * 保证被其他分支共享的图片不会被误删。
+   */
+  async function pruneImages(candidateIds: Set<string>) {
+    if (candidateIds.size === 0) return;
+    const stillReferenced = new Set<string>();
+    for (const conversation of conversations.value) {
+      for (const id of conversationImageIds(conversation)) stillReferenced.add(id);
+    }
+    const orphans = [...candidateIds].filter((id) => !stillReferenced.has(id));
+    if (orphans.length === 0) return;
+    const failed = await deleteImages(orphans);
+    if (failed.length > 0) {
+      console.warn("部分插图未能从本地仓库删除：", failed);
+    }
   }
 
   async function copyMessage(nodeId: string, content: string) {
@@ -531,16 +682,23 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     systemPromptEditorOpen,
     exportModalOpen,
     exporting,
+    illustratingMessageId,
     resolvedModel,
+    resolvedImageModel,
+    illustrationStatus,
     contextUsage,
     renderedSystemPrompt: computed(() => activeConversation.value
         ? renderSystemPrompt(activeConversation.value)
+        : ""),
+    renderedIllustrationPrompt: computed(() => activeConversation.value
+        ? illustrationPromptFor(activeConversation.value, options.generation.contentMode.value)
         : ""),
     createNewConversation,
     selectConversation,
     renameConversation,
     deleteConversation,
     updateSystemPrompt,
+    updateIllustrationPrompt,
     updateConversationVariable,
     applyPreset,
     performExport,
