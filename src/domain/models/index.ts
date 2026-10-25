@@ -1,4 +1,7 @@
-export type ModelCapability = "text" | "streaming" | "reasoning" | "json";
+/** 模型类型：文本模型参与正文生成，图像模型只用于按提示词出图。 */
+export type ModelKind = "text" | "image";
+
+export type ModelCapability = "text" | "streaming" | "reasoning" | "json" | "tools";
 
 export interface ConnectionProfile {
   id: string;
@@ -12,8 +15,13 @@ export interface ProviderModel {
   id: string;
   displayName: string;
   description: string;
+  kind: ModelKind;
   capabilities: ModelCapability[];
+  /** 是否允许该模型产出 NSFW 内容，由用户按提供商实际能力标记 */
+  supportsNsfw: boolean;
+  /** 文本模型的输入上下文长度；图像模型不使用该字段，固定为 0 */
   contextLength: number;
+  /** 文本模型的单次输出上限；图像模型不使用该字段，固定为 0 */
   maxOutputTokens: number;
 }
 
@@ -33,13 +41,27 @@ export const DEFAULT_MODEL_OPTIONS = [
   "claude-sonnet-4-5",
   "qwen-long",
 ];
-export const ALL_CAPABILITIES: ModelCapability[] = ["text", "streaming", "reasoning", "json"];
+export const ALL_CAPABILITIES: ModelCapability[] = ["text", "streaming", "reasoning", "json", "tools"];
 export const CAPABILITY_LABELS: Record<ModelCapability, string> = {
   text: "文本生成",
   streaming: "流式输出",
   reasoning: "深度思考",
   json: "结构化输出",
+  tools: "工具调用",
 };
+export const MODEL_KIND_LABELS: Record<ModelKind, string> = {
+  text: "文本模型",
+  image: "图像模型",
+};
+
+/** 内置默认模型里支持函数工具调用的型号，其余型号由用户在编辑弹窗中自行标记。 */
+const DEFAULT_TOOL_MODELS = new Set([
+  "gpt-4.1-mini",
+  "gpt-4o",
+  "deepseek-chat",
+  "claude-sonnet-4-5",
+  "qwen-long",
+]);
 
 export function createConnectionId(): string {
   return globalThis.crypto?.randomUUID?.()
@@ -47,7 +69,7 @@ export function createConnectionId(): string {
 }
 
 export function defaultProviderModels(): ProviderModel[] {
-  return normalizeProviderModels(DEFAULT_MODEL_OPTIONS);
+  return normalizeProviderModels(DEFAULT_MODEL_OPTIONS, DEFAULT_MODEL_OPTIONS, true);
 }
 
 export function normalizeCapabilities(value: unknown): ModelCapability[] {
@@ -58,9 +80,14 @@ export function normalizeCapabilities(value: unknown): ModelCapability[] {
   return capabilities.length > 0 ? [...new Set(capabilities)] : ["text"];
 }
 
+export function normalizeModelKind(value: unknown): ModelKind {
+  return value === "image" ? "image" : "text";
+}
+
 export function normalizeProviderModels(
     value: unknown,
-    fallback: string[] = DEFAULT_MODEL_OPTIONS
+    fallback: string[] = DEFAULT_MODEL_OPTIONS,
+    applyDefaultTools = false
 ): ProviderModel[] {
   const source = Array.isArray(value) ? value : fallback;
   const models: ProviderModel[] = [];
@@ -73,15 +100,28 @@ export function normalizeProviderModels(
             ? record.id.trim()
             : "";
     if (!id || usedIds.has(id)) continue;
+    const kind = normalizeModelKind(record?.kind);
+    const isImage = kind === "image";
     const contextLength = Number(record?.contextLength ?? 128000);
     const maxOutputTokens = Number(record?.maxOutputTokens ?? 8192);
+    const capabilities = isImage
+        ? []
+        : applyDefaultTools && DEFAULT_TOOL_MODELS.has(id)
+            ? normalizeCapabilities([...(Array.isArray(record?.capabilities) ? record.capabilities : ["text", "streaming"]), "tools"])
+            : normalizeCapabilities(record?.capabilities);
     models.push({
       id,
       displayName: typeof record?.displayName === "string" ? record.displayName.trim() : "",
       description: typeof record?.description === "string" ? record.description.trim() : "",
-      capabilities: normalizeCapabilities(record?.capabilities),
-      contextLength: Number.isInteger(contextLength) && contextLength > 0 ? contextLength : 128000,
-      maxOutputTokens: Number.isInteger(maxOutputTokens) && maxOutputTokens > 0 ? maxOutputTokens : 8192,
+      kind,
+      capabilities,
+      supportsNsfw: record?.supportsNsfw === true,
+      contextLength: isImage
+          ? 0
+          : Number.isInteger(contextLength) && contextLength > 0 ? contextLength : 128000,
+      maxOutputTokens: isImage
+          ? 0
+          : Number.isInteger(maxOutputTokens) && maxOutputTokens > 0 ? maxOutputTokens : 8192,
     });
     usedIds.add(id);
   }
@@ -133,7 +173,8 @@ export function modelSelectionKey(providerId: string, modelId: string): string {
 
 export function resolveModelSelection(
     value: string,
-    profiles: ConnectionProfile[]
+    profiles: ConnectionProfile[],
+    kind?: ModelKind
 ): ResolvedModel | null {
   const separator = value.indexOf("|");
   if (separator < 0) return null;
@@ -147,7 +188,8 @@ export function resolveModelSelection(
   }
   const provider = profiles.find((item) => item.id === providerId);
   const model = provider?.models.find((item) => item.id === modelId);
-  return provider && model ? {provider, model} : null;
+  if (!provider || !model) return null;
+  return kind && model.kind !== kind ? null : {provider, model};
 }
 
 export function modelDisplayName(model: ProviderModel): string {
@@ -156,4 +198,18 @@ export function modelDisplayName(model: ProviderModel): string {
 
 export function resolvedModelLabel(resolved: ResolvedModel): string {
   return `${modelDisplayName(resolved.model)} · ${resolved.provider.name}`;
+}
+
+/** 列出指定类型的全部模型选项，供写作页与设置页的下拉框按类型过滤。 */
+export function modelOptionsByKind(
+    profiles: ConnectionProfile[],
+    kind: ModelKind
+): Array<{value: string; label: string; providerName: string}> {
+  return profiles.flatMap((provider) => provider.models
+      .filter((model) => model.kind === kind)
+      .map((model) => ({
+        value: modelSelectionKey(provider.id, model.id),
+        label: modelDisplayName(model),
+        providerName: provider.name,
+      })));
 }

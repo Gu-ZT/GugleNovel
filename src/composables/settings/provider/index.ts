@@ -1,17 +1,19 @@
-import {computed, ref} from "vue";
+import {computed, ref, watch} from "vue";
 import {
   DEFAULT_CONNECTION_ID,
   DEFAULT_ENDPOINT,
   SETTINGS_KEY,
   createConnectionId,
   defaultProviderModels,
-  modelDisplayName,
+  modelOptionsByKind,
   modelSelectionKey,
   normalizeCapabilities,
   normalizeConnectionProfiles,
+  normalizeModelKind,
   resolveModelSelection as resolveSelection,
   type ConnectionProfile,
   type ModelCapability,
+  type ModelKind,
   type ProviderModel,
   type ResolvedModel,
 } from "../../../domain/models";
@@ -20,6 +22,7 @@ import {loadJson, saveJson} from "../../../services/storage";
 interface PersistedProviderSettings {
   providers?: unknown;
   activeSelection?: unknown;
+  activeImageSelection?: unknown;
 }
 
 type UnsavedChangesDecision = "save" | "discard" | "cancel";
@@ -56,23 +59,30 @@ export function useProviderSettings() {
   const modelDraftId = ref("");
   const modelDraftDisplayName = ref("");
   const modelDraftDescription = ref("");
+  const modelDraftKind = ref<ModelKind>("text");
   const modelDraftCapabilities = ref<ModelCapability[]>(["text", "streaming"]);
+  const modelDraftSupportsNsfw = ref(false);
   const modelDraftContextLength = ref(128000);
   const modelDraftMaxOutputTokens = ref(8192);
   const modelDraftError = ref("");
   const modelSelection = ref(typeof persisted.activeSelection === "string" ? persisted.activeSelection : "");
+  const imageModelSelection = ref(
+      typeof persisted.activeImageSelection === "string" ? persisted.activeImageSelection : ""
+  );
 
-  const modelSelectOptions = computed(() => connectionProfiles.value
-      .filter((provider) => provider.models.length > 0)
-      .map((provider) => ({
-        isGroup: true as const,
-        label: provider.name,
-        options: provider.models.map((model) => ({
-          value: modelSelectionKey(provider.id, model.id),
-          label: modelDisplayName(model),
-          providerName: provider.name,
-        })),
-      })));
+  /** 文本模型按提供商分组，写作页与生图模型选择共用同一份过滤规则。 */
+  const modelSelectOptions = computed(() => groupModelOptions("text"));
+  const imageModelSelectOptions = computed(() => groupModelOptions("image"));
+
+  function groupModelOptions(kind: ModelKind) {
+    return connectionProfiles.value
+        .map((provider) => ({
+          isGroup: true as const,
+          label: provider.name,
+          options: modelOptionsByKind([provider], kind),
+        }))
+        .filter((group) => group.options.length > 0);
+  }
 
   const selectedProvider = computed(() => connectionProfiles.value.find(
       (provider) => provider.id === selectedProviderId.value
@@ -96,23 +106,42 @@ export function useProviderSettings() {
     saveJson(SETTINGS_KEY, {
       providers: connectionProfiles.value,
       activeSelection: modelSelection.value,
+      activeImageSelection: imageModelSelection.value,
     });
   }
 
+  watch([modelSelection, imageModelSelection], persist);
+
   function resolveModelSelection(value: string): ResolvedModel | null {
-    return resolveSelection(value, connectionProfiles.value);
+    return resolveSelection(value, connectionProfiles.value, "text");
+  }
+
+  function resolveImageModelSelection(value: string): ResolvedModel | null {
+    return resolveSelection(value, connectionProfiles.value, "image");
   }
 
   function firstModelSelection(): string {
-    const provider = connectionProfiles.value.find((item) => item.models.length > 0);
-    const model = provider?.models[0];
-    return provider && model ? modelSelectionKey(provider.id, model.id) : "";
+    for (const provider of connectionProfiles.value) {
+      const model = provider.models.find((item) => item.kind === "text");
+      if (model) return modelSelectionKey(provider.id, model.id);
+    }
+    return "";
+  }
+
+  function firstImageModelSelection(): string {
+    for (const provider of connectionProfiles.value) {
+      const model = provider.models.find((item) => item.kind === "image");
+      if (model) return modelSelectionKey(provider.id, model.id);
+    }
+    return "";
   }
 
   function ensureModelSelection() {
     if (!resolveModelSelection(modelSelection.value)) {
       modelSelection.value = firstModelSelection();
     }
+    const imageSelection = resolveImageModelSelection(imageModelSelection.value);
+    if (!imageSelection) imageModelSelection.value = firstImageModelSelection();
     if (!connectionProfiles.value.some((item) => item.id === selectedProviderId.value)) {
       selectedProviderId.value = connectionProfiles.value[0]?.id ?? "";
     }
@@ -233,9 +262,11 @@ export function useProviderSettings() {
     modelDraftId.value = providerModel?.id ?? "";
     modelDraftDisplayName.value = providerModel?.displayName ?? "";
     modelDraftDescription.value = providerModel?.description ?? "";
+    modelDraftKind.value = providerModel?.kind ?? "text";
     modelDraftCapabilities.value = [...(providerModel?.capabilities ?? ["text", "streaming"])];
-    modelDraftContextLength.value = providerModel?.contextLength ?? 128000;
-    modelDraftMaxOutputTokens.value = providerModel?.maxOutputTokens ?? 8192;
+    modelDraftSupportsNsfw.value = providerModel?.supportsNsfw ?? false;
+    modelDraftContextLength.value = providerModel?.contextLength || 128000;
+    modelDraftMaxOutputTokens.value = providerModel?.maxOutputTokens || 8192;
     modelDraftError.value = "";
     modelModalOpen.value = true;
   }
@@ -247,7 +278,18 @@ export function useProviderSettings() {
     modelDraftError.value = "";
   }
 
+  function setDraftKind(kind: ModelKind) {
+    modelDraftKind.value = normalizeModelKind(kind);
+    // 图像模型不参与正文生成，切换到图像类型时清空文本侧能力标记
+    if (modelDraftKind.value === "image") {
+      modelDraftCapabilities.value = [];
+    } else if (modelDraftCapabilities.value.length === 0) {
+      modelDraftCapabilities.value = ["text", "streaming"];
+    }
+  }
+
   function toggleDraftCapability(capability: ModelCapability) {
+    if (modelDraftKind.value === "image") return;
     modelDraftCapabilities.value = modelDraftCapabilities.value.includes(capability)
         ? modelDraftCapabilities.value.filter((item) => item !== capability)
         : [...modelDraftCapabilities.value, capability];
@@ -256,6 +298,7 @@ export function useProviderSettings() {
   function saveModelDraft() {
     const provider = connectionProfiles.value.find((item) => item.id === modelDraftProviderId.value);
     const id = modelDraftId.value.trim();
+    const isImage = modelDraftKind.value === "image";
     const contextLength = Number(modelDraftContextLength.value);
     const maxOutputTokens = Number(modelDraftMaxOutputTokens.value);
     if (!provider) return;
@@ -267,11 +310,11 @@ export function useProviderSettings() {
       modelDraftError.value = "该提供商中已存在相同模型 ID";
       return;
     }
-    if (!Number.isInteger(contextLength) || contextLength < 1) {
+    if (!isImage && (!Number.isInteger(contextLength) || contextLength < 1)) {
       modelDraftError.value = "输入上下文长度必须是大于 0 的整数";
       return;
     }
-    if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1) {
+    if (!isImage && (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1)) {
       modelDraftError.value = "最大输出长度必须是大于 0 的整数";
       return;
     }
@@ -279,9 +322,11 @@ export function useProviderSettings() {
       id,
       displayName: modelDraftDisplayName.value.trim(),
       description: modelDraftDescription.value.trim(),
-      capabilities: normalizeCapabilities(modelDraftCapabilities.value),
-      contextLength,
-      maxOutputTokens,
+      kind: isImage ? "image" : "text",
+      capabilities: isImage ? [] : normalizeCapabilities(modelDraftCapabilities.value),
+      supportsNsfw: modelDraftSupportsNsfw.value,
+      contextLength: isImage ? 0 : contextLength,
+      maxOutputTokens: isImage ? 0 : maxOutputTokens,
     };
     const previousId = modelDraftOriginalId.value;
     const models = previousId
@@ -290,9 +335,13 @@ export function useProviderSettings() {
     connectionProfiles.value = connectionProfiles.value.map(
         (item) => item.id === provider.id ? {...item, models} : item
     );
-    if (previousId && previousId !== id
-        && modelSelection.value === modelSelectionKey(provider.id, previousId)) {
-      modelSelection.value = modelSelectionKey(provider.id, id);
+    if (previousId && previousId !== id) {
+      if (modelSelection.value === modelSelectionKey(provider.id, previousId)) {
+        modelSelection.value = modelSelectionKey(provider.id, id);
+      }
+      if (imageModelSelection.value === modelSelectionKey(provider.id, previousId)) {
+        imageModelSelection.value = modelSelectionKey(provider.id, id);
+      }
     }
     ensureModelSelection();
     closeModelModal();
@@ -325,14 +374,19 @@ export function useProviderSettings() {
     modelDraftId,
     modelDraftDisplayName,
     modelDraftDescription,
+    modelDraftKind,
     modelDraftCapabilities,
+    modelDraftSupportsNsfw,
     modelDraftContextLength,
     modelDraftMaxOutputTokens,
     modelDraftError,
     modelSelection,
+    imageModelSelection,
     modelSelectOptions,
+    imageModelSelectOptions,
     hasUnsavedChanges,
     resolveModelSelection,
+    resolveImageModelSelection,
     ensureModelSelection,
     resolveUnsavedChanges,
     selectProvider,
@@ -342,6 +396,7 @@ export function useProviderSettings() {
     removeProvider,
     openModelModal,
     closeModelModal,
+    setDraftKind,
     toggleDraftCapability,
     saveModelDraft,
     removeProviderModel,

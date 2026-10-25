@@ -1,5 +1,7 @@
 import {computed, ref} from "vue";
 import {
+  DEFAULT_NSFW_ILLUSTRATION_PROMPT,
+  DEFAULT_SFW_ILLUSTRATION_PROMPT,
   PROMPT_SETTINGS_KEY,
   createPresetId,
   normalizePromptPresets,
@@ -29,6 +31,8 @@ export function usePromptSettings() {
   const editingPresetId = ref(presets.value[0]?.id ?? "");
   const presetDraftName = ref("");
   const presetDraftSystemPrompt = ref("");
+  const presetDraftSfwIllustrationPrompt = ref("");
+  const presetDraftNsfwIllustrationPrompt = ref("");
 
   const activePreset = computed(() => presets.value.find(
       (preset) => preset.id === activePresetId.value
@@ -50,6 +54,8 @@ export function usePromptSettings() {
     editingPresetId.value = preset?.id ?? "";
     presetDraftName.value = preset?.name ?? "";
     presetDraftSystemPrompt.value = preset?.systemPrompt ?? "";
+    presetDraftSfwIllustrationPrompt.value = preset?.sfwIllustrationPrompt ?? DEFAULT_SFW_ILLUSTRATION_PROMPT;
+    presetDraftNsfwIllustrationPrompt.value = preset?.nsfwIllustrationPrompt ?? DEFAULT_NSFW_ILLUSTRATION_PROMPT;
   }
 
   function selectPreset(presetId: string) {
@@ -61,6 +67,8 @@ export function usePromptSettings() {
       id: createPresetId(),
       name: `预设 ${presets.value.length + 1}`,
       systemPrompt: "",
+      sfwIllustrationPrompt: DEFAULT_SFW_ILLUSTRATION_PROMPT,
+      nsfwIllustrationPrompt: DEFAULT_NSFW_ILLUSTRATION_PROMPT,
       isDefault: false,
     };
     presets.value = [...presets.value, preset];
@@ -72,7 +80,13 @@ export function usePromptSettings() {
     const id = editingPresetId.value;
     if (!id) return;
     presets.value = presets.value.map((preset) => preset.id === id
-        ? {...preset, name: presetDraftName.value.trim() || preset.name, systemPrompt: presetDraftSystemPrompt.value}
+        ? {
+          ...preset,
+          name: presetDraftName.value.trim() || preset.name,
+          systemPrompt: presetDraftSystemPrompt.value,
+          sfwIllustrationPrompt: presetDraftSfwIllustrationPrompt.value,
+          nsfwIllustrationPrompt: presetDraftNsfwIllustrationPrompt.value,
+        }
         : preset
     );
     persist();
@@ -102,6 +116,8 @@ export function usePromptSettings() {
     editingPresetId,
     presetDraftName,
     presetDraftSystemPrompt,
+    presetDraftSfwIllustrationPrompt,
+    presetDraftNsfwIllustrationPrompt,
     selectPreset,
     addPreset,
     savePresetDraft,
