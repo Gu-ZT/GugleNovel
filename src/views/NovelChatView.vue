@@ -18,7 +18,7 @@ import BranchTreePanel from "../components/BranchTreePanel.vue";
 import ChatIllustration from "../components/ChatIllustration.vue";
 import {useVisualViewport} from "../composables/viewport/visual";
 import {renderMarkdown} from "../services/markdown";
-import {messageText} from "../domain/tree";
+import {messageText, stripIllustrationMarkers} from "../domain/tree";
 import {CONTENT_MODE_LABELS, type ContentMode} from "../domain/prompts";
 
 const props = defineProps<{app: any}>();
@@ -220,7 +220,7 @@ function switchContentMode(mode: ContentMode) {
                   <div
                       v-if="segment.type === 'text'"
                       class="message-content markdown-body"
-                      v-html="renderMarkdown(segment.text)"
+                      v-html="renderMarkdown(stripIllustrationMarkers(segment.text))"
                   ></div>
                   <ChatIllustration
                       v-else

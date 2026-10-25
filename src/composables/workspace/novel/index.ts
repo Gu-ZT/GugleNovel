@@ -392,7 +392,7 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
       onIllustrationStart: (start) => {
         mutateConversation(conversationId, (target) => {
           const node = target.nodes[assistantNode.id];
-          if (node) appendImageSegment(node, start.prompt, start.meta);
+          if (node) appendImageSegment(node, start.prompt, start.meta, start.toolCallId);
         });
       },
       onIllustrationReady: (ready) => {

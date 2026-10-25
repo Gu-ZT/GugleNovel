@@ -40,6 +40,12 @@ export interface ImageSegment {
   error?: string;
   /** 调用参数快照，旧数据缺失时按可选处理 */
   meta?: ImageSegmentMeta;
+  /**
+   * 触发该插图的工具调用 id。
+   * 重建上下文时用它把插图还原为 assistant.tool_calls 与对应的 tool 结果，
+   * 旧数据缺失时退回文本标注。
+   */
+  toolCallId?: string;
 }
 
 export type MessageSegment = TextSegment | ImageSegment;
@@ -169,18 +175,95 @@ export function subtreeIds(conversation: Conversation, nodeId: string): string[]
 export function messageText(node: MessageNode): string {
   return node.segments
       .filter((segment): segment is TextSegment => segment.type === "text")
-      .map((segment) => segment.text)
+      .map((segment) => stripIllustrationMarkers(segment.text))
+      .filter(Boolean)
       .join("\n\n");
 }
 
-/** 供主模型读取的上下文形式：插图以文字占位，避免重复传输图片。 */
+/**
+ * 清理模型误写进正文的插图标记。
+ * 插图应由工具调用产生，但模型可能模仿上下文里的标注自行输出方括号说明，
+ * 这些文本不属于正文，展示与再次进入上下文前都要剔除。
+ */
+export function stripIllustrationMarkers(text: string): string {
+  return text
+      .replace(/\[插图[：:][^\]]*\]/g, "")
+      .replace(/<illustration\b[^>]*\/?>/gi, "")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+}
+
+/** 上下文中的一条消息，字段对应 OpenAI Chat Completions 的消息结构。 */
+export interface ContextMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  tool_calls?: Array<{id: string; type: "function"; function: {name: string; arguments: string}}>;
+  tool_call_id?: string;
+}
+
+/** 工具调用的函数名，与 domain/illustration 中的定义保持一致。 */
+const ILLUSTRATION_TOOL_FUNCTION = "insert_illustration";
+
+/** 插图成功生成后回填给模型的工具结果文本。 */
+const ILLUSTRATION_TOOL_RESULT = "插图已生成并插入到当前段落之后。";
+
+/**
+ * 把一条消息还原为上下文消息序列。
+ * 插图在生成时本就是一次工具调用，这里重建 assistant.tool_calls 与 tool 结果，
+ * 让模型看到的是真实调用记录，避免它模仿文本标注在正文里写插图说明。
+ * 缺少调用 id 的历史插图退回文本标注，保证旧会话仍能表达「此处有图」。
+ */
+export function messageContextMessages(node: MessageNode): ContextMessage[] {
+  const messages: ContextMessage[] = [];
+  let pendingText = "";
+
+  const flushText = () => {
+    if (!pendingText.trim()) return;
+    messages.push({role: node.role, content: pendingText});
+    pendingText = "";
+  };
+
+  for (const segment of node.segments) {
+    if (segment.type === "text") {
+      const cleaned = stripIllustrationMarkers(segment.text);
+      if (!cleaned) continue;
+      pendingText = pendingText ? `${pendingText}\n\n${cleaned}` : cleaned;
+      continue;
+    }
+    if (segment.status !== "ready") continue;
+    if (!segment.toolCallId) {
+      // 旧数据没有调用 id，只能用文本标注表示此处有图
+      const description = segment.prompt.replace(/"/g, "'").replace(/\s+/g, " ").trim();
+      const marker = `<illustration description="${description}" />`;
+      pendingText = pendingText ? `${pendingText}\n\n${marker}` : marker;
+      continue;
+    }
+    // 正文先落到 assistant 消息，插图作为一次工具调用紧随其后
+    flushText();
+    messages.push({
+      role: "assistant",
+      content: "",
+      tool_calls: [{
+        id: segment.toolCallId,
+        type: "function",
+        function: {name: ILLUSTRATION_TOOL_FUNCTION, arguments: JSON.stringify({prompt: segment.prompt})},
+      }],
+    });
+    messages.push({role: "tool", tool_call_id: segment.toolCallId, content: ILLUSTRATION_TOOL_RESULT});
+  }
+  flushText();
+  return messages;
+}
+
+/**
+ * 供主模型读取的上下文文本形式。
+ * 保留给只接受单条文本的场景（标题生成、token 估算），
+ * 插图的真实调用记录由 messageContextMessages 提供。
+ */
 export function messageContextText(node: MessageNode): string {
-  return node.segments
-      .map((segment) => {
-        if (segment.type === "text") return segment.text;
-        // 未成功的插图不应让主模型以为画面已经存在
-        return segment.status === "ready" ? `[插图：${segment.prompt}]` : "";
-      })
+  return messageContextMessages(node)
+      .map((message) => message.content)
       .filter(Boolean)
       .join("\n\n");
 }
@@ -203,7 +286,8 @@ export function appendTextSegment(node: MessageNode, delta: string): void {
 export function appendImageSegment(
     node: MessageNode,
     prompt: string,
-    meta?: ImageSegmentMeta
+    meta?: ImageSegmentMeta,
+    toolCallId?: string
 ): ImageSegment {
   const segment: ImageSegment = {
     type: "image",
@@ -211,6 +295,7 @@ export function appendImageSegment(
     prompt,
     status: "pending",
     meta,
+    toolCallId,
   };
   node.segments.push(segment);
   return segment;
@@ -320,16 +405,22 @@ export function normalizeSegments(record: Record<string, unknown>): MessageSegme
       const segment = item as Record<string, unknown>;
       if (segment.type === "image") {
         const imageId = typeof segment.imageId === "string" ? segment.imageId : "";
+        const prompt = typeof segment.prompt === "string" ? segment.prompt : "";
+        const meta = normalizeImageMeta(segment.meta);
+        const toolCallId = typeof segment.toolCallId === "string" && segment.toolCallId
+            ? segment.toolCallId
+            : undefined;
         // 存储中残留的生成中状态意味着上次生成被打断，运行时已无法回填，
         // 必须在这里降级为失败，否则界面会永久显示进度
         if (segment.status === "pending") {
           segments.push({
             type: "image",
             imageId,
-            prompt: typeof segment.prompt === "string" ? segment.prompt : "",
+            prompt,
             status: "failed",
             error: "上次生成未完成",
-            meta: normalizeImageMeta(segment.meta),
+            meta,
+            toolCallId,
           });
           continue;
         }
@@ -337,30 +428,26 @@ export function normalizeSegments(record: Record<string, unknown>): MessageSegme
           segments.push({
             type: "image",
             imageId,
-            prompt: typeof segment.prompt === "string" ? segment.prompt : "",
+            prompt,
             status: "failed",
             error: typeof segment.error === "string" ? segment.error : "插图生成失败",
-            meta: normalizeImageMeta(segment.meta),
+            meta,
+            toolCallId,
           });
           continue;
         }
         // 旧数据没有 status 字段：有图片引用即视为已就绪，无引用说明插图数据缺失
         if (imageId) {
-          segments.push({
-            type: "image",
-            imageId,
-            prompt: typeof segment.prompt === "string" ? segment.prompt : "",
-            status: "ready",
-            meta: normalizeImageMeta(segment.meta),
-          });
+          segments.push({type: "image", imageId, prompt, status: "ready", meta, toolCallId});
         } else {
           segments.push({
             type: "image",
             imageId: "",
-            prompt: typeof segment.prompt === "string" ? segment.prompt : "",
+            prompt,
             status: "failed",
             error: "插图数据缺失",
-            meta: normalizeImageMeta(segment.meta),
+            meta,
+            toolCallId,
           });
         }
         continue;

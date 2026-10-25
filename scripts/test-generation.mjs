@@ -251,6 +251,10 @@ check(
   "系统提示词包含生图提示词",
   String(chatRequests[0]?.messages?.[0]?.content).includes(illustrationPromptText),
 );
+check(
+  "系统提示词包含插图输出规则",
+  String(chatRequests[0]?.messages?.[0]?.content).includes(prompts.ILLUSTRATION_OUTPUT_CONSTRAINT),
+);
 check("第二轮请求包含 assistant.tool_calls", Array.isArray(chatRequests[1]?.messages?.at(-2)?.tool_calls));
 check("第二轮请求包含 tool 结果", chatRequests[1]?.messages?.at(-1)?.role === "tool");
 check("工具结果包含成功说明", String(chatRequests[1]?.messages?.at(-1)?.content).includes("插图已生成"));
@@ -331,9 +335,15 @@ check("生图失败：保留失败卡片以定位", failedCard?.status === "fail
 check("生图失败：卡片记录失败原因", String(failedCard?.error).includes("HTTP 400"));
 check("生图失败：没有产生可用图片", !node4.segments.some((s) => s.type === "image" && s.imageId));
 check("生图失败：正文继续生成", tree.messageText(node4).includes("三"));
+const failureToolResult = String(chatRequests[1]?.messages?.at(-1)?.content);
+check("生图失败：回告主模型已跳过", failureToolResult.includes("未能生成"));
 check(
-  "生图失败：失败原因回告主模型",
-  String(chatRequests[1]?.messages?.at(-1)?.content).includes("HTTP 400"),
+  "生图失败：不把接口原始报错回告主模型",
+  !failureToolResult.includes("HTTP 400"),
+);
+check(
+  "生图失败：要求继续写正文且不描述画面",
+  failureToolResult.includes("继续写正文") && failureToolResult.includes("不要在正文中描述"),
 );
 check("生图失败：通知回调", callbacks4.events.some(([kind]) => kind === "illustration-failed"));
 
@@ -467,6 +477,65 @@ try {
 }
 check("中断：抛出 AbortError 供上层识别", aborted);
 check("中断：只请求了一次主模型", chatRequests.length === 1);
+
+// 场景 13：历史插图在新一轮生成时重建为消息对，并通过真实传输层发给服务端
+reset();
+const historyNode = {
+  id: "history-a1", parentId: null, childrenIds: [], role: "assistant", segments: [], createdAt: 1,
+};
+tree.appendTextSegment(historyNode, "上一条回复的正文");
+const historySegment = tree.appendImageSegment(historyNode, "旧插图画面", undefined, "call_history");
+tree.completeImageSegment(historyNode, historySegment, "img-history");
+tree.appendTextSegment(historyNode, "上一条回复的结尾");
+
+const historyConversation = {
+  id: "conv-history",
+  title: "历史",
+  createdAt: 1,
+  systemPrompt: "",
+  variables: {},
+  nodes: {
+    u1: {id: "u1", parentId: null, childrenIds: ["history-a1"], role: "user", segments: [{type: "text", text: "写"}], createdAt: 1},
+    "history-a1": historyNode,
+    u2: {id: "u2", parentId: "history-a1", childrenIds: [], role: "user", segments: [{type: "text", text: "继续"}], createdAt: 2},
+  },
+  rootIds: ["u1"],
+  activeLeafId: "u2",
+};
+chatScript = [{text: "新一段正文", toolCalls: []}];
+const historyMessages = generation.buildRequestMessages(historyConversation, "系统", 128000);
+check(
+  "历史插图重建为 assistant 工具调用",
+  historyMessages.some((message) => message.role === "assistant" && message.tool_calls?.length === 1),
+);
+check(
+  "历史插图重建为 tool 结果",
+  historyMessages.some((message) => message.role === "tool" && message.tool_call_id === "call_history"),
+);
+await generation.runGeneration(
+  makeOptions({illustration: {enabled: false}}),
+  historyMessages,
+  new AbortController().signal,
+  makeCallbacks(newTarget("n13")),
+);
+const sentHistory = chatRequests[0]?.messages ?? [];
+check(
+  "服务端收到的历史包含工具调用",
+  sentHistory.some((message) => message.role === "assistant" && Array.isArray(message.tool_calls)),
+);
+check(
+  "服务端收到的历史包含配对工具结果",
+  sentHistory.some((message) => message.role === "tool" && message.tool_call_id === "call_history"),
+);
+check(
+  "历史中不再出现插图标记文本",
+  !sentHistory.some((message) => String(message.content).includes("illustration description")),
+);
+check(
+  "每个工具调用都有对应结果",
+  sentHistory.filter((message) => message.role === "tool").length
+  === sentHistory.reduce((total, message) => total + (message.tool_calls?.length ?? 0), 0),
+);
 
 server.closeAllConnections?.();
 await new Promise((resolve) => server.close(resolve));

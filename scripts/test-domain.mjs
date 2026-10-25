@@ -32,7 +32,111 @@ check("pending 插图不进入模型上下文", !tree.messageContextText(node).i
 const completedSegment = node.segments[1];
 tree.completeImageSegment(node, completedSegment, "img-1", 1200);
 check("completeImageSegment 回填图片引用", completedSegment.status === "ready" && completedSegment.imageId === "img-1");
-check("messageContextText 用占位代替已完成的插图", tree.messageContextText(node).includes("[插图：雨夜街灯]"));
+check(
+  "messageContextText 用结构化标注代替已完成的插图",
+  tree.messageContextText(node).includes('<illustration description="雨夜街灯" />'),
+);
+
+// --- 插图标记清洗 ---
+check(
+  "清洗方括号插图标记",
+  tree.stripIllustrationMarkers("正文一\n\n[插图：清晨的厨房，逆光]\n\n正文二") === "正文一\n\n正文二",
+);
+check(
+  "清洗英文冒号的插图标记",
+  tree.stripIllustrationMarkers("正文[插图: 画面]继续") === "正文继续",
+);
+check(
+  "清洗结构化标注只删除标记本身",
+  tree.stripIllustrationMarkers('正文 <illustration description="画面" /> 后续') === "正文  后续",
+);
+check(
+  "清洗整行结构化标注",
+  !tree.stripIllustrationMarkers('正文\n<illustration description="画面" />\n后续').includes("illustration"),
+);
+check(
+  "清洗标注保留其后的正文",
+  tree.stripIllustrationMarkers('正文\n<illustration description="画面" />\n后续').includes("后续"),
+);
+check("清洗后不残留多余空行", tree.stripIllustrationMarkers("一\n\n\n\n二") === "一\n\n二");
+check("普通正文不受影响", tree.stripIllustrationMarkers("她推开木门。") === "她推开木门。");
+
+// 历史消息中模型自写的标记不得进入上下文，避免被继续模仿
+const pollutedNode = {
+  id: "n-polluted", parentId: null, childrenIds: [], role: "assistant", createdAt: 1,
+  segments: [{type: "text", text: "正文\n\n[插图：模型自己写的画面]\n\n后续正文"}],
+};
+check(
+  "上下文剔除模型自写的插图标记",
+  !tree.messageContextText(pollutedNode).includes("[插图"),
+);
+check(
+  "上下文保留标记两侧正文",
+  tree.messageContextText(pollutedNode).includes("正文")
+  && tree.messageContextText(pollutedNode).includes("后续正文"),
+);
+check(
+  "纯文本输出剔除模型自写的插图标记",
+  !tree.messageText(pollutedNode).includes("[插图"),
+);
+check(
+  "上下文占位使用结构化标注",
+  tree.messageContextText(node).includes("<illustration description="),
+);
+check(
+  "上下文占位不再使用正文式方括号",
+  !tree.messageContextText(node).includes("[插图"),
+);
+
+// --- 插图作为工具调用记录进入上下文 ---
+const toolNode = {id: "n-tool", parentId: null, childrenIds: [], role: "assistant", segments: [], createdAt: 1};
+tree.appendTextSegment(toolNode, "第一段正文");
+const toolSegment = tree.appendImageSegment(toolNode, "雨夜街灯", undefined, "call_abc");
+tree.completeImageSegment(toolNode, toolSegment, "img-tool");
+tree.appendTextSegment(toolNode, "第二段正文");
+
+const contextMessages = tree.messageContextMessages(toolNode);
+check(
+  "插图重建为 assistant 工具调用与 tool 结果",
+  contextMessages.some((message) => message.role === "assistant" && message.tool_calls?.length === 1)
+  && contextMessages.some((message) => message.role === "tool"),
+);
+const toolCallMessage = contextMessages.find((message) => message.tool_calls?.length === 1);
+check("工具调用使用原始调用 id", toolCallMessage?.tool_calls?.[0]?.id === "call_abc");
+check("工具调用函数名为 insert_illustration",
+  toolCallMessage?.tool_calls?.[0]?.function.name === "insert_illustration");
+check(
+  "工具调用参数保留提示词",
+  JSON.parse(toolCallMessage.tool_calls[0].function.arguments).prompt === "雨夜街灯",
+);
+const toolResultMessage = contextMessages.find((message) => message.role === "tool");
+check("工具结果关联调用 id", toolResultMessage?.tool_call_id === "call_abc");
+check("上下文不再出现插图标记文本", !tree.messageContextText(toolNode).includes("illustration"));
+check(
+  "正文与工具调用顺序保持",
+  contextMessages[0].content === "第一段正文"
+  && contextMessages.at(-1).content === "第二段正文",
+);
+
+// 未完成或缺失调用 id 的插图不重建为真实调用
+const pendingToolNode = {id: "n-pending", parentId: null, childrenIds: [], role: "assistant", createdAt: 1, segments: []};
+tree.appendTextSegment(pendingToolNode, "正文");
+const pendingSegment = tree.appendImageSegment(pendingToolNode, "还没好", undefined, "call_pending");
+tree.failImageSegment(pendingToolNode, pendingSegment, "HTTP 500");
+check(
+  "失败的插图不重建为工具调用",
+  !tree.messageContextMessages(pendingToolNode).some((message) => message.role === "tool"),
+);
+
+const legacyToolNode = {id: "n-legacy", parentId: null, childrenIds: [], role: "assistant", createdAt: 1, segments: []};
+tree.appendTextSegment(legacyToolNode, "正文");
+const legacySegment = tree.appendImageSegment(legacyToolNode, "旧图");
+tree.completeImageSegment(legacyToolNode, legacySegment, "img-legacy");
+check(
+  "缺少调用 id 的旧插图退回文本标注",
+  tree.messageContextText(legacyToolNode).includes("<illustration description=")
+  && !tree.messageContextMessages(legacyToolNode).some((message) => message.role === "tool"),
+);
 
 // --- 插图卡片状态 ---
 const meta = {
@@ -229,11 +333,11 @@ const conversation = {
 };
 const requestMessages = generation.buildRequestMessages(conversation, "system", 128000);
 check("请求消息首条为系统提示词", requestMessages[0].role === "system");
-check("图片以占位进入上下文", requestMessages.at(-1).content.includes("[插图：画面]"));
+check("图片以结构化标注进入上下文", requestMessages.at(-1).content.includes('<illustration description="画面" />'));
 
 const tinyBudget = generation.buildRequestMessages(conversation, "system", 1);
 check("超预算时仍保留系统提示词", tinyBudget[0]?.role === "system");
-check("超预算时保留最新一条消息", tinyBudget.at(-1)?.content.includes("[插图：画面]"));
+check("超预算时保留最新一条消息", tinyBudget.at(-1)?.content.includes('<illustration description="画面" />'));
 check("超预算时裁掉更早的消息", !tinyBudget.some((message) => message.content === "写一段"));
 
 // --- 默认提示词 ---

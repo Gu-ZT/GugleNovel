@@ -1,5 +1,5 @@
 import {strToU8, zipSync} from "fflate";
-import {resolvePath, type Conversation, type ImageSegment, type MessageNode} from "../../domain/tree";
+import {resolvePath, stripIllustrationMarkers, type Conversation, type ImageSegment, type MessageNode} from "../../domain/tree";
 import {inTauriShell} from "../../composables/fetch";
 import {loadImage} from "../image/store";
 
@@ -11,7 +11,7 @@ function exportableChapters(conversation: Conversation): MessageNode[] {
     if (node.role !== "assistant") return false;
     return node.segments.some((segment) => segment.type === "image"
         ? segment.status === "ready" && Boolean(segment.imageId)
-        : segment.text.trim().length > 0);
+        : stripIllustrationMarkers(segment.text).length > 0);
   });
 }
 
@@ -26,7 +26,7 @@ export function buildTxt(conversation: Conversation): string {
   const body = chapters
       .map((node) => node.segments
           .map((segment) => segment.type === "text"
-              ? segment.text.trim()
+              ? stripIllustrationMarkers(segment.text)
               : imagePlaceholder(segment))
           .filter(Boolean)
           .join("\n\n"))
@@ -97,7 +97,7 @@ export async function buildEpub(conversation: Conversation): Promise<Uint8Array>
     const parts: string[] = [];
     for (const segment of node.segments) {
       if (segment.type === "text") {
-        const html = paragraphsHtml(segment.text.trim());
+        const html = paragraphsHtml(stripIllustrationMarkers(segment.text));
         if (html) parts.push(html);
         continue;
       }

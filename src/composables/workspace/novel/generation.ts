@@ -2,7 +2,7 @@ import {
   appendImageSegment,
   appendTextSegment,
   createNodeId,
-  messageContextText,
+  messageContextMessages,
   paragraphsSinceLastImage,
   resolvePath,
   type Conversation,
@@ -14,7 +14,7 @@ import {
   buildIllustrationTool,
   parseIllustrationPrompt,
 } from "../../../domain/illustration";
-import {SFW_ONLY_ILLUSTRATION_CONSTRAINT, type ContentMode} from "../../../domain/prompts";
+import {ILLUSTRATION_OUTPUT_CONSTRAINT, SFW_ONLY_ILLUSTRATION_CONSTRAINT, type ContentMode} from "../../../domain/prompts";
 import {OpenAIConnection} from "../../../api";
 import type {ResolvedModel} from "../../../domain/models";
 import {generateIllustration} from "../../../services/image";
@@ -67,6 +67,8 @@ export interface GenerationCallbacks {
 export interface IllustrationStart {
   prompt: string;
   meta: ImageSegmentMeta;
+  /** 触发该插图的工具调用 id，用于在上下文中重建调用记录 */
+  toolCallId: string;
 }
 
 export interface IllustrationReady {
@@ -93,12 +95,14 @@ export function isIllustrationActive(options: GenerationOptions): boolean {
       && options.model.model.capabilities.includes("tools");
 }
 
-/** 组装主模型看到的系统提示词：会话提示词 + 生图提示词 + 生图模型能力限制。 */
+/** 组装主模型看到的系统提示词：会话提示词 + 生图提示词 + 输出规则 + 生图模型能力限制。 */
 export function composeSystemPrompt(options: GenerationOptions): string {
   const parts = [options.systemPrompt.trim()];
   const illustration = options.illustration;
   if (isIllustrationActive(options)) {
     if (illustration.systemPrompt.trim()) parts.push(illustration.systemPrompt.trim());
+    // 输出规则由程序固定追加，即使用户把生图提示词删空也能阻止模型在正文里写插图标记
+    parts.push(ILLUSTRATION_OUTPUT_CONSTRAINT);
     const imageAllowsNsfw = illustration.imageModel?.model.supportsNsfw === true;
     if (illustration.contentMode === "nsfw" && !imageAllowsNsfw) {
       parts.push(SFW_ONLY_ILLUSTRATION_CONSTRAINT);
@@ -115,16 +119,18 @@ export function buildRequestMessages(
 ): ChatRequestMessage[] {
   const charBudget = contextLength * 4; // 粗略估算：1 token ≈ 4 字符
   const path = resolvePath(conversation);
+  /** 每条历史消息展开为一条或多条上下文消息，插图会展开成工具调用与结果 */
+  const blocks = path.map((node) => messageContextMessages(node).filter((message) => message.content.trim()
+      || (message.tool_calls?.length ?? 0) > 0));
   const messages: ChatRequestMessage[] = [];
   let used = systemPrompt.length;
-  for (let index = path.length - 1; index >= 0; index--) {
-    const node = path[index];
-    const content = messageContextText(node);
-    // 只有未成功插图的消息在上下文里没有内容，跳过以免发出空的 assistant 消息
-    if (!content.trim()) continue;
-    if (used + content.length > charBudget && messages.length > 0) break;
-    messages.unshift({role: node.role, content});
-    used += content.length;
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    const block = blocks[index];
+    if (block.length === 0) continue;
+    const blockLength = block.reduce((total, message) => total + message.content.length, 0);
+    if (used + blockLength > charBudget && messages.length > 0) break;
+    messages.unshift(...block as ChatRequestMessage[]);
+    used += blockLength;
   }
   return [
     ...(systemPrompt.trim() ? [{role: "system" as const, content: systemPrompt}] : []),
@@ -260,9 +266,10 @@ async function handleToolCall(
     paragraphsSinceLastImage: paragraphs,
     callIndex,
     imageModelSupportsNsfw: imageModel.model.supportsNsfw,
-  };  // 影子节点同步插入占位，保证后续正文与新插图的分段边界一致
-  appendImageSegment(shadow, prompt, callMeta);
-  callbacks.onIllustrationStart({prompt, meta: callMeta});
+  };
+  // 影子节点同步插入占位，保证后续正文与新插图的分段边界一致
+  appendImageSegment(shadow, prompt, callMeta, call.id);
+  callbacks.onIllustrationStart({prompt, meta: callMeta, toolCallId: call.id});
   try {
     const generated = await generateIllustration({model: imageModel, prompt, signal});
     const imageId = await saveImage(generated.blob, generated.mimeType);
@@ -275,8 +282,10 @@ async function handleToolCall(
     if (isAbortError(error)) throw error;
     const reason = error instanceof Error ? error.message : String(error);
     callbacks.onIllustrationFailed({prompt, reason, durationMs: Date.now() - startedAt, callIndex});
+    // 回传给主模型的内容只说明结果，不携带接口原始报错，
+    // 避免模型据此改写或复述画面描述
     return {
-      content: `插图生成失败（${reason}）。请继续写正文，不要重复调用本工具。`,
+      content: "本次插图未能生成，已跳过。请直接继续写正文，不要重复调用本工具，也不要在正文中描述这张画面。",
     };
   }
 }
