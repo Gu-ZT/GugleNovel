@@ -6,6 +6,7 @@ import {
   paragraphsSinceLastImage,
   resolvePath,
   type Conversation,
+  type ImageSegmentMeta,
   type MessageNode,
 } from "../../../domain/tree";
 import {
@@ -54,12 +55,32 @@ export interface GenerationCallbacks {
   /** 正文增量，调用方按同样顺序追加到真实消息节点 */
   onTextDelta: (delta: string) => void;
   onReasoning: (fullReasoning: string) => void;
-  /** 插图开始生成，用于在调用位置展示进度 */
-  onIllustrationStart: () => void;
-  /** 插图写入本地仓库完成，参数为可写入消息的图片引用 */
-  onIllustration: (imageId: string, prompt: string) => void;
-  /** 插图失败后移除进度态；正文继续生成 */
-  onIllustrationFailed: (reason: string) => void;
+  /** 模型发起插图调用：调用方在此刻插入生成中卡片，位置即插图最终位置 */
+  onIllustrationStart: (start: IllustrationStart) => void;
+  /** 插图写入本地仓库完成：调用方把对应卡片回填为图片 */
+  onIllustrationReady: (ready: IllustrationReady) => void;
+  /** 插图失败：调用方把对应卡片标记为失败；正文继续生成 */
+  onIllustrationFailed: (failed: IllustrationFailed) => void;
+}
+
+/** 插图调用开始时的上下文快照，用于卡片展示与参数留存。 */
+export interface IllustrationStart {
+  prompt: string;
+  meta: ImageSegmentMeta;
+}
+
+export interface IllustrationReady {
+  prompt: string;
+  imageId: string;
+  durationMs: number;
+  callIndex: number;
+}
+
+export interface IllustrationFailed {
+  prompt: string;
+  reason: string;
+  durationMs: number;
+  callIndex: number;
 }
 
 /**
@@ -99,6 +120,8 @@ export function buildRequestMessages(
   for (let index = path.length - 1; index >= 0; index--) {
     const node = path[index];
     const content = messageContextText(node);
+    // 只有未成功插图的消息在上下文里没有内容，跳过以免发出空的 assistant 消息
+    if (!content.trim()) continue;
     if (used + content.length > charBudget && messages.length > 0) break;
     messages.unshift({role: node.role, content});
     used += content.length;
@@ -182,7 +205,14 @@ export async function runGeneration(
       if (toolCallCount > MAX_TOOL_CALLS_PER_RESPONSE) {
         throw new Error(`单次回复的工具调用超过 ${MAX_TOOL_CALLS_PER_RESPONSE} 次，已停止生成`);
       }
-      const outcome = await handleToolCall(options, shadow, call, signal, callbacks);
+      const outcome = await handleToolCall(
+          options,
+          shadow,
+          call,
+          signal,
+          callbacks,
+          toolCallCount,
+      );
       workingMessages.push({role: "tool", tool_call_id: call.id, content: outcome.content});
     }
   }
@@ -193,13 +223,14 @@ interface ToolCallOutcome {
   content: string;
 }
 
-/** 处理一次工具调用：未通过频率校验时只回传原因，通过后生图并插入正文。 */
+/** 处理一次工具调用：未通过频率校验时只回传原因，通过后生图并在正文中插入卡片。 */
 async function handleToolCall(
     options: GenerationOptions,
     shadow: MessageNode,
     call: {id: string; name: string; arguments: string},
     signal: AbortSignal,
-    callbacks: GenerationCallbacks
+    callbacks: GenerationCallbacks,
+    callIndex: number
 ): Promise<ToolCallOutcome> {
   if (call.name !== ILLUSTRATION_TOOL_NAME) {
     return {content: `不支持的函数：${call.name}。请不要调用该函数。`};
@@ -221,19 +252,29 @@ async function handleToolCall(
   if (!imageModel) {
     return {content: "尚未配置图像模型，本次未生成插图。请继续写正文。"};
   }
-  callbacks.onIllustrationStart();
+  const startedAt = Date.now();
+  const callMeta: ImageSegmentMeta = {
+    imageModel: imageModel.model.id,
+    imageProvider: imageModel.provider.name,
+    contentMode: options.illustration.contentMode,
+    paragraphsSinceLastImage: paragraphs,
+    callIndex,
+    imageModelSupportsNsfw: imageModel.model.supportsNsfw,
+  };  // 影子节点同步插入占位，保证后续正文与新插图的分段边界一致
+  appendImageSegment(shadow, prompt, callMeta);
+  callbacks.onIllustrationStart({prompt, meta: callMeta});
   try {
     const generated = await generateIllustration({model: imageModel, prompt, signal});
     const imageId = await saveImage(generated.blob, generated.mimeType);
-    appendImageSegment(shadow, imageId, prompt);
-    callbacks.onIllustration(imageId, prompt);
+    const durationMs = Date.now() - startedAt;
+    callbacks.onIllustrationReady({prompt, imageId, durationMs, callIndex});
     return {
       content: "插图已生成并插入到当前段落之后。请继续写正文，不要重复描述刚才已经配图的画面。",
     };
   } catch (error) {
     if (isAbortError(error)) throw error;
     const reason = error instanceof Error ? error.message : String(error);
-    callbacks.onIllustrationFailed(reason);
+    callbacks.onIllustrationFailed({prompt, reason, durationMs: Date.now() - startedAt, callIndex});
     return {
       content: `插图生成失败（${reason}）。请继续写正文，不要重复调用本工具。`,
     };

@@ -140,7 +140,14 @@ function assert(condition, message) {
 }
 
 if (scenario) {
-  const isImageScenario = scenario.startsWith("prunes-") || scenario === "keeps-shared-image";
+  // 场景名显式登记，未登记的走会话场景；两者都不匹配时由各自实现断言失败
+  const imageScenarios = [
+    "prunes-unshared-image",
+    "keeps-shared-image",
+    "prunes-on-conversation-delete",
+    "deletes-node-with-failed-card",
+  ];
+  const isImageScenario = imageScenarios.includes(scenario);
   const runner = isImageScenario
       ? runImageScenario(scenario)
       : runSessionPersistenceScenario(scenario);
@@ -234,7 +241,12 @@ async function runMainTests() {
   );
 
   // 图片清理依赖模块级持久化状态，必须在独立进程中验证
-  const imageScenarios = ["prunes-unshared-image", "keeps-shared-image", "prunes-on-conversation-delete"];
+  const imageScenarios = [
+    "prunes-unshared-image",
+    "keeps-shared-image",
+    "prunes-on-conversation-delete",
+    "deletes-node-with-failed-card",
+  ];
   for (const imageScenario of imageScenarios) {
     const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), imageScenario], {
       cwd: root,
@@ -281,15 +293,17 @@ function seedImageConversation() {
     id: "a1", parentId: "u1", childrenIds: [], role: "assistant", createdAt: 2,
     segments: [
       {type: "text", text: "分支一"},
-      {type: "image", imageId: imageIds.shared, prompt: "共享图"},
+      {type: "image", imageId: imageIds.shared, prompt: "共享图", status: "ready"},
     ],
   };
   const branchB = {
     id: "a2", parentId: "u1", childrenIds: [], role: "assistant", createdAt: 3,
     segments: [
       {type: "text", text: "分支二"},
-      {type: "image", imageId: imageIds.shared, prompt: "共享图"},
-      {type: "image", imageId: imageIds.exclusive, prompt: "仅分支二"},
+      {type: "image", imageId: imageIds.shared, prompt: "共享图", status: "ready"},
+      {type: "image", imageId: imageIds.exclusive, prompt: "仅分支二", status: "ready"},
+      // 失败卡片用于验证删除时不会把空引用当成待删图片
+      {type: "image", imageId: "", prompt: "失败的图", status: "failed", error: "HTTP 500"},
     ],
   };
   store.set("gugle-novel-conversations", JSON.stringify([{
@@ -328,6 +342,15 @@ async function runImageScenario(name) {
   if (name === "prunes-on-conversation-delete") {
     await imageWorkspace.deleteConversation(imageWorkspace.activeConversation.value.id);
     assert(deletedImages.includes(imageIds.shared), "删除作品后清理其中的图片");
+    return;
+  }
+
+  if (name === "deletes-node-with-failed-card") {
+    // 失败卡片没有图片引用，删除时既不能报错也不能误删其他图片
+    await imageWorkspace.deleteMessage("a2");
+    assert(!deletedImages.some((id) => id === ""), "空图片引用不进入删除集合");
+    assert(!deletedImages.includes(imageIds.shared), "删除失败卡片节点不影响共享图片");
+    assert(imageWorkspace.activeConversation.value?.nodes.a2 === undefined, "节点已从会话中移除");
     return;
   }
 

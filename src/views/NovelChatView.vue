@@ -77,9 +77,10 @@ function scrollToBottom(force = false) {
 const scrollSignal = computed(() => {
   const path = props.app.activePath ?? [];
   const last = path[path.length - 1];
-  // 段落类型与文本长度变化都要触发滚动：插图插入也算一次内容变化
+  // 段落类型、文本长度与插图状态都要触发滚动：卡片由生成中变为图片也会改变高度
   const segmentSignal = last?.segments
-      .map((segment: {type: string; text?: string}) => `${segment.type}:${segment.text?.length ?? 0}`)
+      .map((segment: {type: string; text?: string; status?: string}) =>
+          `${segment.type}:${segment.text?.length ?? 0}:${segment.status ?? ""}`)
       .join(",") ?? "";
   return `${path.length}|${last?.reasoning?.length ?? 0}|${segmentSignal}`;
 });
@@ -200,7 +201,7 @@ function switchContentMode(mode: ContentMode) {
             <form v-if="app.editingMessageId === message.id" class="message-edit" @submit.prevent="app.saveEditedMessage">
               <a-textarea v-model="app.editingContent" :auto-size="{minRows: 3, maxRows: 14}"/>
               <div class="message-edit-actions">
-                <span class="message-edit-hint">保存将创建新分支，原内容保留</span>
+                <span class="message-edit-hint">保存将创建新分支，原内容与插图保留在原分支</span>
                 <a-button size="small" @click="app.cancelEditMessage">取消</a-button>
                 <a-button size="small" type="primary" html-type="submit">保存为新分支</a-button>
               </div>
@@ -221,11 +222,15 @@ function switchContentMode(mode: ContentMode) {
                       class="message-content markdown-body"
                       v-html="renderMarkdown(segment.text)"
                   ></div>
-                  <ChatIllustration v-else :image-id="segment.imageId" :prompt="segment.prompt"/>
+                  <ChatIllustration
+                      v-else
+                      :image-id="segment.imageId"
+                      :prompt="segment.prompt"
+                      :status="segment.status"
+                      :error="segment.error"
+                      :meta="segment.meta"
+                  />
                 </template>
-                <div v-if="app.illustratingMessageId === message.id" class="chat-illustration-loading">
-                  正在生成插图…
-                </div>
               </template>
               <p v-else class="message-content">{{ copyableText(message) }}</p>
             </template>

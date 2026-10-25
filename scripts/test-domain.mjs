@@ -16,14 +16,74 @@ const node = {id: "n1", parentId: null, childrenIds: [], role: "assistant", segm
 tree.appendTextSegment(node, "第一段\n\n第二段");
 check("appendTextSegment 写入首个文本段", node.segments.length === 1 && node.segments[0].text.includes("第二段"));
 
-tree.appendImageSegment(node, "img-1", "雨夜街灯");
-check("appendImageSegment 追加图片段", node.segments.length === 2 && node.segments[1].type === "image");
+tree.appendImageSegment(node, "雨夜街灯");
+check(
+  "appendImageSegment 追加生成中的插图卡片",
+  node.segments.length === 2
+  && node.segments[1].type === "image"
+  && node.segments[1].status === "pending",
+);
 
 tree.appendTextSegment(node, "第三段");
 check("插图之后的文本另起一段", node.segments.length === 3 && node.segments[2].type === "text");
 
 check("messageText 忽略图片", !tree.messageText(node).includes("雨夜街灯"));
-check("messageContextText 用占位代替图片", tree.messageContextText(node).includes("[插图：雨夜街灯]"));
+check("pending 插图不进入模型上下文", !tree.messageContextText(node).includes("[插图"));
+const completedSegment = node.segments[1];
+tree.completeImageSegment(node, completedSegment, "img-1", 1200);
+check("completeImageSegment 回填图片引用", completedSegment.status === "ready" && completedSegment.imageId === "img-1");
+check("messageContextText 用占位代替已完成的插图", tree.messageContextText(node).includes("[插图：雨夜街灯]"));
+
+// --- 插图卡片状态 ---
+const meta = {
+  imageModel: "image-model",
+  imageProvider: "测试商",
+  contentMode: "sfw",
+  paragraphsSinceLastImage: 3,
+  callIndex: 1,
+  imageModelSupportsNsfw: false,
+};
+const cardNode = {id: "n-card", parentId: null, childrenIds: [], role: "assistant", segments: [], createdAt: 1};
+const card = tree.appendImageSegment(cardNode, "雨夜街灯", meta);
+check("卡片初始为生成中且无图片引用", card.status === "pending" && card.imageId === "");
+check("卡片保留调用参数快照", card.meta?.imageModel === "image-model" && card.meta.callIndex === 1);
+
+tree.completeImageSegment(cardNode, card, "img-card", 2400);
+check("完成后状态变为 ready", card.status === "ready");
+check("完成时记录耗时", card.meta?.durationMs === 2400);
+check("完成后保留提示词与参数", card.prompt === "雨夜街灯" && card.meta?.imageProvider === "测试商");
+
+const failedCard = tree.appendImageSegment(cardNode, "失败的图", meta);
+tree.failImageSegment(cardNode, failedCard, "HTTP 400", 500);
+check("失败卡片保留在正文中", failedCard.status === "failed");
+check("失败卡片记录原因", failedCard.error === "HTTP 400");
+check("失败卡片记录耗时", failedCard.meta?.durationMs === 500);
+check("失败插图不进入模型上下文", !tree.messageContextText(cardNode).includes("失败的图"));
+
+// 旧数据缺少 status 时按图片引用判断状态
+const legacyReady = tree.normalizeSegments({segments: [{type: "image", imageId: "old-img", prompt: "旧图"}]});
+check("旧数据有图片引用时视为已完成", legacyReady[0].status === "ready");
+const legacyPending = tree.normalizeSegments({segments: [{type: "image", prompt: "没有图片"}]});
+check("旧数据无图片引用时按失败处理", legacyPending[0].status === "failed");
+check("旧数据缺图时给出具体原因", legacyPending[0].error === "插图数据缺失");
+
+// 存储中残留的生成中状态必须降级，否则刷新后卡片会永久转圈
+const restoredPending = tree.normalizeSegments({
+  segments: [{type: "image", imageId: "", prompt: "被打断", status: "pending"}],
+});
+check("残留的生成中状态降级为失败", restoredPending[0].status === "failed");
+check("残留状态附带可读原因", restoredPending[0].error === "上次生成未完成");
+
+// 参数快照缺失或损坏时字段留空，卡片显示未记录
+const metaWithoutFields = tree.normalizeSegments({
+  segments: [{type: "image", imageId: "i1", prompt: "图", status: "ready", meta: {}}],
+});
+check("缺失的参数快照字段留空", metaWithoutFields[0].meta?.paragraphsSinceLastImage === undefined
+  && metaWithoutFields[0].meta?.imageModelSupportsNsfw === undefined);
+const badMode = tree.normalizeSegments({
+  segments: [{type: "image", imageId: "i1", prompt: "图", status: "ready", meta: {contentMode: "unknown"}}],
+});
+check("非法内容模式不冒充有效值", badMode[0].meta?.contentMode === "");
 
 // --- 段落计数与频率 ---
 check("countParagraphs 按空行分段", tree.countParagraphs("一段\n\n二段\n\n三段") === 3);
@@ -36,7 +96,7 @@ tree.appendTextSegment(intervalNode, "一\n\n二");
 check("未达间隔时段落数为 2", tree.paragraphsSinceLastImage(intervalNode) === 2);
 tree.appendTextSegment(intervalNode, "\n\n三");
 check("同一文本段内段落连续累加", tree.paragraphsSinceLastImage(intervalNode) === 3);
-tree.appendImageSegment(intervalNode, "img-2", "插图");
+tree.appendImageSegment(intervalNode, "插图");
 check("插图之后计数归零", tree.paragraphsSinceLastImage(intervalNode) === 0);
 tree.appendTextSegment(intervalNode, "四");
 check("插图之后重新累计", tree.paragraphsSinceLastImage(intervalNode) === 1);
@@ -162,7 +222,7 @@ const conversation = {
   nodes: {
     u1: {id: "u1", parentId: null, childrenIds: ["a1"], role: "user", segments: [{type: "text", text: "写一段"}], createdAt: 1},
     a1: {id: "a1", parentId: "u1", childrenIds: [], role: "assistant",
-      segments: [{type: "text", text: "正文"}, {type: "image", imageId: "i1", prompt: "画面"}], createdAt: 2},
+      segments: [{type: "text", text: "正文"}, {type: "image", imageId: "i1", prompt: "画面", status: "ready"}], createdAt: 2},
   },
   rootIds: ["u1"],
   activeLeafId: "a1",

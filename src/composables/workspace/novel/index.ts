@@ -4,10 +4,12 @@ import {
   CONVERSATIONS_KEY,
   appendImageSegment,
   appendTextSegment,
+  completeImageSegment,
   conversationImageIds,
   createConversation,
   createNodeId,
   estimatePathTokens,
+  failImageSegment,
   flattenTree,
   messageText,
   normalizeConversations,
@@ -16,6 +18,7 @@ import {
   siblingsOf,
   subtreeIds,
   type Conversation,
+  type ImageSegment,
   type MessageNode,
 } from "../../../domain/tree";
 import {OpenAIConnection} from "../../../api";
@@ -74,8 +77,6 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
   const systemPromptEditorOpen = ref(false);
   const exportModalOpen = ref(false);
   const exporting = ref(false);
-  /** 正在等待图像模型的助手节点，用于在调用位置显示进度 */
-  const illustratingMessageId = ref("");
   let abortController: AbortController | null = null;
   let copyTimer: number | null = null;
 
@@ -375,7 +376,6 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     mutateConversation(conversationId, (target) => appendNode(target, assistantNode));
     const controller = new AbortController();
     abortController = controller;
-    illustratingMessageId.value = "";
     void runGeneration(options_, messages, controller.signal, {
       onTextDelta: (delta) => {
         mutateConversation(conversationId, (target) => {
@@ -389,26 +389,42 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
           if (node) node.reasoning = reasoning;
         });
       },
-      onIllustrationStart: () => {
-        illustratingMessageId.value = assistantNode.id;
-      },
-      onIllustration: (imageId, prompt) => {
-        illustratingMessageId.value = "";
+      onIllustrationStart: (start) => {
         mutateConversation(conversationId, (target) => {
           const node = target.nodes[assistantNode.id];
-          if (node) appendImageSegment(node, imageId, prompt);
+          if (node) appendImageSegment(node, start.prompt, start.meta);
         });
       },
-      onIllustrationFailed: (reason) => {
-        illustratingMessageId.value = "";
-        if (!error.value) error.value = `插图生成失败：${reason}`;
+      onIllustrationReady: (ready) => {
+        mutateConversation(conversationId, (target) => {
+          const node = target.nodes[assistantNode.id];
+          if (!node) return;
+          const segment = findPendingImageSegment(node, ready.callIndex);
+          if (segment) {
+            completeImageSegment(node, segment, ready.imageId, ready.durationMs);
+            return;
+          }
+          // 找不到对应卡片时图片已成为孤儿，记录以便排查本地存储占用
+          console.warn("插图未能回填到消息卡片：", {
+            imageId: ready.imageId,
+            callIndex: ready.callIndex,
+          });
+        });
+      },
+      onIllustrationFailed: (failed) => {
+        mutateConversation(conversationId, (target) => {
+          const node = target.nodes[assistantNode.id];
+          if (!node) return;
+          const segment = findPendingImageSegment(node, failed.callIndex);
+          if (segment) failImageSegment(node, segment, failed.reason, failed.durationMs);
+        });
+        if (!error.value) error.value = `插图生成失败：${failed.reason}`;
       },
     }).then(() => {
       // 用户停止后不应再触发标题生成，保持停止语义完整
       if (controller.signal.aborted) return;
       void maybeGenerateTitle(conversationId, model);
     }).catch((reason) => {
-      illustratingMessageId.value = "";
       if (isAbortError(reason)) {
         mutateConversation(conversationId, (target) => {
           const node = target.nodes[assistantNode.id];
@@ -428,8 +444,31 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     }).finally(() => {
       if (abortController === controller) abortController = null;
       generating.value = false;
-      illustratingMessageId.value = "";
+      // 中断或异常会让还在等待的卡片停在生成中，收尾时统一标记为失败
+      mutateConversation(conversationId, (target) => {
+        const node = target.nodes[assistantNode.id];
+        if (node) failPendingImageSegments(node, controller.signal.aborted ? "已停止生成" : "生成被中断");
+      });
     });
+  }
+
+  /** 把仍处于生成中的插图卡片标记为失败，避免界面永久显示进度。 */
+  function failPendingImageSegments(node: MessageNode, reason: string) {
+    for (const segment of node.segments) {
+      if (segment.type === "image" && segment.status === "pending") {
+        failImageSegment(node, segment, reason);
+      }
+    }
+  }
+
+  /** 定位待回填的插图卡片：调用序号在同一回复内唯一，据此匹配。 */
+  function findPendingImageSegment(node: MessageNode, callIndex: number): ImageSegment | undefined {
+    for (let index = node.segments.length - 1; index >= 0; index--) {
+      const segment = node.segments[index];
+      if (segment.type !== "image" || segment.status !== "pending") continue;
+      if (segment.meta?.callIndex === callIndex) return segment;
+    }
+    return undefined;
   }
 
   function sendMessage() {
@@ -596,7 +635,8 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
       const removedNode = conversation.nodes[id];
       if (!removedNode) continue;
       for (const segment of removedNode.segments) {
-        if (segment.type === "image") removedImageIds.add(segment.imageId);
+        // 未完成或失败的卡片没有图片引用，不能进入待删除集合
+        if (segment.type === "image" && segment.imageId) removedImageIds.add(segment.imageId);
       }
     }
     mutateConversation(conversation.id, (target) => {
@@ -682,7 +722,6 @@ export function useNovelWorkspace(options: NovelWorkspaceOptions) {
     systemPromptEditorOpen,
     exportModalOpen,
     exporting,
-    illustratingMessageId,
     resolvedModel,
     resolvedImageModel,
     illustrationStatus,

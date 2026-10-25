@@ -38,11 +38,19 @@ function summarize(content: string): string {
   return text.length > 24 ? `${text.slice(0, 24)}…` : text || "（空）";
 }
 
-/** 分支卡片摘要：正文取文本段，附图消息额外标注图片数量。 */
+/** 分支卡片摘要：正文取文本段，只统计已完成的插图，失败或生成中单独计数。 */
 function nodeSummary(node: MessageNode): string {
   const text = summarize(messageText(node));
-  const images = node.segments.filter((segment) => segment.type === "image").length;
-  return images > 0 ? `${text}（${images} 张插图）` : text;
+  const images = node.segments.filter(
+      (segment) => segment.type === "image" && segment.status === "ready"
+  ).length;
+  const unfinished = node.segments.filter(
+      (segment) => segment.type === "image" && segment.status !== "ready"
+  ).length;
+  const parts = [text];
+  if (images > 0) parts.push(`（${images} 张插图）`);
+  if (unfinished > 0) parts.push(`（${unfinished} 张未完成）`);
+  return parts.join("");
 }
 
 // 横版树布局：根在最左，每层一列向右展开；叶子按顺序分配行，父节点垂直居中于子树

@@ -95,7 +95,7 @@ const conversation = makeConversation({
     id: "a1", parentId: "u1", childrenIds: [], role: "assistant", createdAt: 2,
     segments: [
       {type: "text", text: "开篇正文\n\n第二段正文"},
-      {type: "image", imageId: "img-1", prompt: "雨夜街灯"},
+      {type: "image", imageId: "img-1", prompt: "雨夜街灯", status: "ready"},
       {type: "text", text: "插图之后的正文"},
     ],
   },
@@ -143,7 +143,7 @@ const missingConversation = makeConversation({
     id: "a1", parentId: "u1", childrenIds: [], role: "assistant", createdAt: 2,
     segments: [
       {type: "text", text: "正文"},
-      {type: "image", imageId: "img-missing", prompt: "丢失的图"},
+      {type: "image", imageId: "img-missing", prompt: "丢失的图", status: "ready"},
     ],
   },
 }, "a1");
@@ -161,7 +161,7 @@ const imageOnlyConversation = makeConversation({
   u1: {id: "u1", parentId: null, childrenIds: ["a1"], role: "user", segments: [{type: "text", text: "写"}], createdAt: 1},
   a1: {
     id: "a1", parentId: "u1", childrenIds: [], role: "assistant", createdAt: 2,
-    segments: [{type: "image", imageId: "img-1", prompt: "纯插图"}],
+    segments: [{type: "image", imageId: "img-1", prompt: "纯插图", status: "ready"}],
   },
 }, "a1");
 const imageOnlyTxt = exportService.buildTxt(imageOnlyConversation);
@@ -183,7 +183,7 @@ const jpegConversation = makeConversation({
   u1: {id: "u1", parentId: null, childrenIds: ["a1"], role: "user", segments: [{type: "text", text: "写"}], createdAt: 1},
   a1: {
     id: "a1", parentId: "u1", childrenIds: [], role: "assistant", createdAt: 2,
-    segments: [{type: "text", text: "正文"}, {type: "image", imageId: "img-jpeg", prompt: "JPEG 图"}],
+    segments: [{type: "text", text: "正文"}, {type: "image", imageId: "img-jpeg", prompt: "JPEG 图", status: "ready"}],
   },
 }, "a1");
 const jpegFiles = unzipSync(await exportService.buildEpub(jpegConversation));
@@ -205,7 +205,7 @@ const unsupportedConversation = makeConversation({
   u1: {id: "u1", parentId: null, childrenIds: ["a1"], role: "user", segments: [{type: "text", text: "写"}], createdAt: 1},
   a1: {
     id: "a1", parentId: "u1", childrenIds: [], role: "assistant", createdAt: 2,
-    segments: [{type: "text", text: "正文"}, {type: "image", imageId: "img-unknown", prompt: "未知格式"}],
+    segments: [{type: "text", text: "正文"}, {type: "image", imageId: "img-unknown", prompt: "未知格式", status: "ready"}],
   },
 }, "a1");
 let unsupportedError = "";
@@ -223,15 +223,58 @@ const sharedConversation = makeConversation({
     id: "a1", parentId: "u1", childrenIds: [], role: "assistant", createdAt: 2,
     segments: [
       {type: "text", text: "一"},
-      {type: "image", imageId: "img-1", prompt: "共用图"},
+      {type: "image", imageId: "img-1", prompt: "共用图", status: "ready"},
       {type: "text", text: "二"},
-      {type: "image", imageId: "img-1", prompt: "共用图"},
+      {type: "image", imageId: "img-1", prompt: "共用图", status: "ready"},
     ],
   },
 }, "a1");
 const sharedFiles = unzipSync(await exportService.buildEpub(sharedConversation));
 const sharedImages = Object.keys(sharedFiles).filter((name) => name.startsWith("OEBPS/images/"));
 check("同一图片只打包一次", sharedImages.length === 1);
+
+// 失败与生成中的插图卡片不得进入成书
+const brokenCardsConversation = makeConversation({
+  u1: {id: "u1", parentId: null, childrenIds: ["a1"], role: "user", segments: [{type: "text", text: "写"}], createdAt: 1},
+  a1: {
+    id: "a1", parentId: "u1", childrenIds: [], role: "assistant", createdAt: 2,
+    segments: [
+      {type: "text", text: "正文一"},
+      {type: "image", imageId: "", prompt: "失败的图", status: "failed", error: "HTTP 500"},
+      {type: "text", text: "正文二"},
+      {type: "image", imageId: "", prompt: "还在生成", status: "pending"},
+    ],
+  },
+}, "a1");
+const brokenTxt = exportService.buildTxt(brokenCardsConversation);
+check("TXT 跳过失败插图占位", !brokenTxt.includes("失败的图"));
+check("TXT 跳过生成中插图占位", !brokenTxt.includes("还在生成"));
+check("TXT 保留两侧正文", brokenTxt.includes("正文一") && brokenTxt.includes("正文二"));
+const brokenFiles = unzipSync(await exportService.buildEpub(brokenCardsConversation));
+check(
+  "EPUB 不打包未完成的插图",
+  !Object.keys(brokenFiles).some((name) => name.startsWith("OEBPS/images/")),
+);
+check(
+  "EPUB 不输出未完成的插图占位",
+  !strFromU8(brokenFiles["OEBPS/chapter-1.xhtml"]).includes("失败的图"),
+);
+
+// 只含未完成插图的消息不得产出空章节
+const onlyBrokenConversation = makeConversation({
+  u1: {id: "u1", parentId: null, childrenIds: ["a1"], role: "user", segments: [{type: "text", text: "写"}], createdAt: 1},
+  a1: {
+    id: "a1", parentId: "u1", childrenIds: [], role: "assistant", createdAt: 2,
+    segments: [{type: "image", imageId: "", prompt: "只有失败图", status: "failed", error: "HTTP 500"}],
+  },
+}, "a1");
+const onlyBrokenTxt = exportService.buildTxt(onlyBrokenConversation);
+check("TXT 不为纯失败插图留空行", onlyBrokenTxt.trim() === "测试作品");
+const onlyBrokenFiles = unzipSync(await exportService.buildEpub(onlyBrokenConversation));
+check(
+  "EPUB 不为纯失败插图生成章节",
+  !Object.keys(onlyBrokenFiles).some((name) => name.startsWith("OEBPS/chapter-")),
+);
 
 console.log(failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

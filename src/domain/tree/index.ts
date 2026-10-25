@@ -1,3 +1,5 @@
+import type {ContentMode} from "../prompts";
+
 export type MessageRole = "system" | "user" | "assistant";
 
 /** 助手正文的最小单元：文本段与插图段按生成顺序交替排列。 */
@@ -6,12 +8,38 @@ export interface TextSegment {
   text: string;
 }
 
+/** 插图生成状态：调用发生时先插入 pending 段，完成或失败后原地更新。 */
+export type ImageSegmentStatus = "pending" | "ready" | "failed";
+
+/** 一次插图调用的参数快照，用于卡片展开后回看当时的生成条件；字段缺失表示未记录。 */
+export interface ImageSegmentMeta {
+  /** 生成该插图的图像模型 id */
+  imageModel: string;
+  /** 图像模型所属提供商名称 */
+  imageProvider: string;
+  /** 内容模式：SFW 或 NSFW */
+  contentMode: ContentMode | "";
+  /** 触发该插图时距离上一张插图的正文段落数 */
+  paragraphsSinceLastImage?: number;
+  /** 本次回复中的工具调用序号，用于定位卡片；被拒绝的调用同样计入 */
+  callIndex?: number;
+  /** 图像模型是否标记支持 NSFW */
+  imageModelSupportsNsfw?: boolean;
+  /** 生成耗时（毫秒），失败时记录已耗时 */
+  durationMs?: number;
+}
+
 export interface ImageSegment {
   type: "image";
-  /** 图片二进制存放在 IndexedDB，本地只在消息中保留引用 id */
+  /** 图片二进制存放在 IndexedDB，本地只在消息中保留引用 id；pending 与 failed 时为空 */
   imageId: string;
   /** 主模型提交给图像模型的提示词，用于展示与导出说明 */
   prompt: string;
+  status: ImageSegmentStatus;
+  /** 失败原因，仅 failed 状态填写 */
+  error?: string;
+  /** 调用参数快照，旧数据缺失时按可选处理 */
+  meta?: ImageSegmentMeta;
 }
 
 export type MessageSegment = TextSegment | ImageSegment;
@@ -148,7 +176,12 @@ export function messageText(node: MessageNode): string {
 /** 供主模型读取的上下文形式：插图以文字占位，避免重复传输图片。 */
 export function messageContextText(node: MessageNode): string {
   return node.segments
-      .map((segment) => segment.type === "text" ? segment.text : `[插图：${segment.prompt}]`)
+      .map((segment) => {
+        if (segment.type === "text") return segment.text;
+        // 未成功的插图不应让主模型以为画面已经存在
+        return segment.status === "ready" ? `[插图：${segment.prompt}]` : "";
+      })
+      .filter(Boolean)
       .join("\n\n");
 }
 
@@ -162,9 +195,58 @@ export function appendTextSegment(node: MessageNode, delta: string): void {
   }
 }
 
-/** 在当前正文之后插入一张插图，后续正文会落到图片之后的新文本段。 */
-export function appendImageSegment(node: MessageNode, imageId: string, prompt: string): void {
-  node.segments.push({type: "image", imageId, prompt});
+/**
+ * 在当前正文之后插入插图卡片，返回该段的引用。
+ * 调用时先以 pending 状态插入占位，生图结束后由调用方原地回填图片或失败原因，
+ * 保证卡片位置就是插图最终位置。
+ */
+export function appendImageSegment(
+    node: MessageNode,
+    prompt: string,
+    meta?: ImageSegmentMeta
+): ImageSegment {
+  const segment: ImageSegment = {
+    type: "image",
+    imageId: "",
+    prompt,
+    status: "pending",
+    meta,
+  };
+  node.segments.push(segment);
+  return segment;
+}
+
+/** 插图生成完成：回填图片引用与耗时。 */
+export function completeImageSegment(
+    node: MessageNode,
+    segment: ImageSegment,
+    imageId: string,
+    durationMs?: number
+): void {
+  const target = node.segments.find(
+      (item): item is ImageSegment => item === segment
+  );
+  if (!target) return;
+  target.imageId = imageId;
+  target.status = "ready";
+  target.error = undefined;
+  if (durationMs !== undefined && target.meta) target.meta.durationMs = durationMs;
+}
+
+/** 插图生成失败：保留卡片并记录原因，便于在正文中定位。 */
+export function failImageSegment(
+    node: MessageNode,
+    segment: ImageSegment,
+    reason: string,
+    durationMs?: number
+): void {
+  const target = node.segments.find(
+      (item): item is ImageSegment => item === segment
+  );
+  if (!target) return;
+  target.status = "failed";
+  target.error = reason;
+  if (durationMs !== undefined && target.meta) target.meta.durationMs = durationMs;
 }
 
 /** 节点的全部图片引用 id，用于删除消息后清理无主图片。 */
@@ -172,7 +254,7 @@ export function conversationImageIds(conversation: Conversation): string[] {
   const ids = new Set<string>();
   for (const node of Object.values(conversation.nodes)) {
     for (const segment of node.segments) {
-      if (segment.type === "image") ids.add(segment.imageId);
+      if (segment.type === "image" && segment.imageId) ids.add(segment.imageId);
     }
   }
   return [...ids];
@@ -237,12 +319,50 @@ export function normalizeSegments(record: Record<string, unknown>): MessageSegme
       if (!item || typeof item !== "object") continue;
       const segment = item as Record<string, unknown>;
       if (segment.type === "image") {
-        if (typeof segment.imageId !== "string" || !segment.imageId) continue;
-        segments.push({
-          type: "image",
-          imageId: segment.imageId,
-          prompt: typeof segment.prompt === "string" ? segment.prompt : "",
-        });
+        const imageId = typeof segment.imageId === "string" ? segment.imageId : "";
+        // 存储中残留的生成中状态意味着上次生成被打断，运行时已无法回填，
+        // 必须在这里降级为失败，否则界面会永久显示进度
+        if (segment.status === "pending") {
+          segments.push({
+            type: "image",
+            imageId,
+            prompt: typeof segment.prompt === "string" ? segment.prompt : "",
+            status: "failed",
+            error: "上次生成未完成",
+            meta: normalizeImageMeta(segment.meta),
+          });
+          continue;
+        }
+        if (segment.status === "failed") {
+          segments.push({
+            type: "image",
+            imageId,
+            prompt: typeof segment.prompt === "string" ? segment.prompt : "",
+            status: "failed",
+            error: typeof segment.error === "string" ? segment.error : "插图生成失败",
+            meta: normalizeImageMeta(segment.meta),
+          });
+          continue;
+        }
+        // 旧数据没有 status 字段：有图片引用即视为已就绪，无引用说明插图数据缺失
+        if (imageId) {
+          segments.push({
+            type: "image",
+            imageId,
+            prompt: typeof segment.prompt === "string" ? segment.prompt : "",
+            status: "ready",
+            meta: normalizeImageMeta(segment.meta),
+          });
+        } else {
+          segments.push({
+            type: "image",
+            imageId: "",
+            prompt: typeof segment.prompt === "string" ? segment.prompt : "",
+            status: "failed",
+            error: "插图数据缺失",
+            meta: normalizeImageMeta(segment.meta),
+          });
+        }
         continue;
       }
       if (typeof segment.text === "string") {
@@ -255,6 +375,29 @@ export function normalizeSegments(record: Record<string, unknown>): MessageSegme
     return [{type: "text", text: record.content}];
   }
   return [];
+}
+
+/**
+ * 插图参数快照逐字段校验：记录来源不可信，
+ * 无法确认的字段一律留空，由卡片显示「未记录」。
+ */
+function normalizeImageMeta(value: unknown): ImageSegmentMeta | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const durationMs = Number(record.durationMs);
+  return {
+    imageModel: typeof record.imageModel === "string" ? record.imageModel : "",
+    imageProvider: typeof record.imageProvider === "string" ? record.imageProvider : "",
+    contentMode: record.contentMode === "nsfw" || record.contentMode === "sfw" ? record.contentMode : "",
+    paragraphsSinceLastImage: Number.isFinite(Number(record.paragraphsSinceLastImage))
+        ? Number(record.paragraphsSinceLastImage)
+        : undefined,
+    callIndex: Number.isFinite(Number(record.callIndex)) ? Number(record.callIndex) : undefined,
+    imageModelSupportsNsfw: typeof record.imageModelSupportsNsfw === "boolean"
+        ? record.imageModelSupportsNsfw
+        : undefined,
+    durationMs: Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : undefined,
+  };
 }
 
 function normalizeNode(value: unknown): MessageNode | null {

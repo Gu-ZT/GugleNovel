@@ -170,6 +170,11 @@ function makeOptions(overrides = {}) {
 
 function makeCallbacks(target) {
   const events = [];
+  /** 与生产调用方一致：开始即落位卡片，完成或失败后原地回填。 */
+  const findPending = (callIndex) => target.segments.find(
+    (segment) => segment.type === "image" && segment.status === "pending"
+      && segment.meta?.callIndex === callIndex,
+  );
   return {
     events,
     onTextDelta: (delta) => {
@@ -177,12 +182,20 @@ function makeCallbacks(target) {
       tree.appendTextSegment(target, delta);
     },
     onReasoning: () => {},
-    onIllustrationStart: () => events.push(["illustration-start"]),
-    onIllustration: (imageId, prompt) => {
-      events.push(["illustration", prompt]);
-      tree.appendImageSegment(target, imageId, prompt);
+    onIllustrationStart: (start) => {
+      events.push(["illustration-start", start.prompt]);
+      tree.appendImageSegment(target, start.prompt, start.meta);
     },
-    onIllustrationFailed: (reason) => events.push(["illustration-failed", reason]),
+    onIllustrationReady: (ready) => {
+      events.push(["illustration-ready", ready.prompt]);
+      const segment = findPending(ready.callIndex);
+      if (segment) tree.completeImageSegment(target, segment, ready.imageId, ready.durationMs);
+    },
+    onIllustrationFailed: (failed) => {
+      events.push(["illustration-failed", failed.reason]);
+      const segment = findPending(failed.callIndex);
+      if (segment) tree.failImageSegment(target, segment, failed.reason, failed.durationMs);
+    },
   };
 }
 
@@ -227,7 +240,10 @@ check("图像请求使用所选图像模型", imageRequests[0]?.model === "image
 check("图像请求携带工具提交的提示词", imageRequests[0]?.prompt === "雨夜街灯");
 check("完整链路：图片写入 IndexedDB", imageStore.size === 1);
 check("完整链路：分段顺序为 文本-图片-文本", node1.segments.map((s) => s.type).join(",") === "text,image,text");
+check("完整链路：插图卡片已完成", node1.segments[1]?.status === "ready");
 check("完整链路：图片段带提示词", node1.segments[1]?.prompt === "雨夜街灯");
+check("完整链路：图片段记录参数快照", node1.segments[1]?.meta?.imageModel === "image-model"
+  && node1.segments[1]?.meta?.paragraphsSinceLastImage === 2);
 check("完整链路：续写落在图片之后", node1.segments[2]?.text === "第三段");
 check("请求包含工具定义", Array.isArray(chatRequests[0]?.tools) && chatRequests[0].tools.length === 1);
 check("请求禁止并行工具调用", chatRequests[0]?.parallel_tool_calls === false);
@@ -310,7 +326,10 @@ await run(
   {userText: "写", signal: new AbortController().signal},
 );
 globalThis.fetch = originalFetch;
-check("生图失败：没有插入图片段", node4.segments.every((s) => s.type === "text"));
+const failedCard = node4.segments.find((s) => s.type === "image");
+check("生图失败：保留失败卡片以定位", failedCard?.status === "failed");
+check("生图失败：卡片记录失败原因", String(failedCard?.error).includes("HTTP 400"));
+check("生图失败：没有产生可用图片", !node4.segments.some((s) => s.type === "image" && s.imageId));
 check("生图失败：正文继续生成", tree.messageText(node4).includes("三"));
 check(
   "生图失败：失败原因回告主模型",

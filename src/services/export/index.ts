@@ -1,5 +1,5 @@
 import {strToU8, zipSync} from "fflate";
-import {resolvePath, type Conversation, type MessageNode} from "../../domain/tree";
+import {resolvePath, type Conversation, type ImageSegment, type MessageNode} from "../../domain/tree";
 import {inTauriShell} from "../../composables/fetch";
 import {loadImage} from "../image/store";
 
@@ -7,15 +7,18 @@ export type ExportFormat = "txt" | "epub";
 
 /** 导出当前浏览路径上的 AI 正文（assistant 消息），指令消息不进入成书。 */
 function exportableChapters(conversation: Conversation): MessageNode[] {
-  return resolvePath(conversation)
-      .filter((node) => node.role === "assistant"
-          && node.segments.some((segment) => segment.type === "image"
-              || segment.text.trim().length > 0));
+  return resolvePath(conversation).filter((node) => {
+    if (node.role !== "assistant") return false;
+    return node.segments.some((segment) => segment.type === "image"
+        ? segment.status === "ready" && Boolean(segment.imageId)
+        : segment.text.trim().length > 0);
+  });
 }
 
-/** 正文中的插图占位文本，TXT 用它标记图片位置。 */
-function imagePlaceholder(prompt: string): string {
-  return prompt ? `[插图：${prompt}]` : "[插图]";
+/** 正文中的插图占位文本，TXT 用它标记图片位置；未成功的插图不进入成书。 */
+function imagePlaceholder(segment: ImageSegment): string {
+  if (segment.status !== "ready") return "";
+  return segment.prompt ? `[插图：${segment.prompt}]` : "[插图]";
 }
 
 export function buildTxt(conversation: Conversation): string {
@@ -24,7 +27,7 @@ export function buildTxt(conversation: Conversation): string {
       .map((node) => node.segments
           .map((segment) => segment.type === "text"
               ? segment.text.trim()
-              : imagePlaceholder(segment.prompt))
+              : imagePlaceholder(segment))
           .filter(Boolean)
           .join("\n\n"))
       .join("\n\n");
@@ -98,6 +101,8 @@ export async function buildEpub(conversation: Conversation): Promise<Uint8Array>
         if (html) parts.push(html);
         continue;
       }
+      // 未成功的插图不写入成书，避免出现有图位没有图片的版面
+      if (segment.status !== "ready") continue;
       // 文件名按导出顺序分配，避免不同图片 id 生成相同文件名而互相覆盖
       const stored = images.get(segment.imageId)
           ?? await loadStoredImage(segment.imageId, images.size + 1);

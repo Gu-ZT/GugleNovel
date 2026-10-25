@@ -282,48 +282,154 @@
   font-size: 11px;
 }
 
-/* 插图：按正文宽度等比展示，提示词作为图注；数据缺失时保留可读占位 */
-.chat-illustration {
+/* 插图卡片：调用位置即最终位置，pending 与 failed 保留占位以便定位 */
+.illustration-card {
   margin: 12px 0;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  overflow: hidden;
+}
+
+.illustration-card.pending {
+  border-style: dashed;
+}
+
+.illustration-card.failed {
+  border-color: rgb(var(--danger-3));
+}
+
+.illustration-card-header {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--color-border-2);
+  background: var(--color-fill-1);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.illustration-card-header:hover {
+  background: var(--color-fill-2);
+}
+
+.illustration-card-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--color-text-2);
+  font-size: 13px;
+}
+
+.illustration-card.failed .illustration-card-state {
+  color: rgb(var(--danger-6));
+}
+
+.illustration-card-spin {
+  animation: illustration-spin 1s linear infinite;
+}
+
+@keyframes illustration-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.illustration-card-toggle {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+
+.illustration-card-chevron {
+  transition: transform 0.15s;
+}
+
+.illustration-card-chevron.open {
+  transform: rotate(180deg);
+}
+
+.illustration-card img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.illustration-card-placeholder {
+  padding: 28px 12px;
+  color: var(--color-text-3);
+  font-size: 13px;
   text-align: center;
 }
 
-.chat-illustration img {
-  max-width: 100%;
-  height: auto;
-  border: 1px solid var(--color-border-2);
-  border-radius: 8px;
+.illustration-card-placeholder.failed {
+  color: rgb(var(--danger-6));
 }
 
-.chat-illustration figcaption {
-  margin-top: 6px;
-  color: var(--color-text-4);
+.illustration-card-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-top: 1px solid var(--color-border-2);
+  background: var(--color-fill-1);
+}
+
+.illustration-card-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.illustration-card-label {
+  color: var(--color-text-3);
   font-size: 12px;
-  line-height: 1.6;
-  text-align: left;
+}
+
+.illustration-card-prompt {
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
   word-break: break-word;
 }
 
-.chat-illustration-loading {
-  padding: 24px 12px;
-  margin: 12px 0;
-  color: var(--color-text-3);
-  font-size: 13px;
-  text-align: center;
-  background: var(--color-fill-1);
-  border: 1px dashed var(--color-border-2);
-  border-radius: 8px;
+.illustration-card-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 6px 16px;
+  margin: 0;
 }
 
-.chat-illustration-missing {
-  padding: 16px 12px;
-  margin: 12px 0;
-  color: var(--color-text-3);
-  font-size: 13px;
-  text-align: center;
-  background: var(--color-fill-1);
-  border: 1px dashed var(--color-border-2);
-  border-radius: 8px;
+.illustration-card-meta-row {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.illustration-card-meta-row dt {
+  flex-shrink: 0;
+  color: var(--color-text-4);
+}
+
+.illustration-card-meta-row dd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .message-edit {
